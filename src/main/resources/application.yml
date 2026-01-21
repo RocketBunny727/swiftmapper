@@ -1,0 +1,19 @@
+swiftmapper:
+  datasource:
+    #H2
+#    url: jdbc:h2:tcp://localhost:9092/default
+#    username: sa
+#    password:
+#    driver-class-name: org.h2.Driver
+
+    #PgSQL
+     url: jdbc:postgresql://localhost:5432/swiftmapper
+     username: postgres
+     password: 471979
+     driver-class-name: org.postgresql.Driver
+
+logging:
+  level:
+    ru.nsu.swiftmapper: INFO
+  pattern:
+    console: "%d{HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
