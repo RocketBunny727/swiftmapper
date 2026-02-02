@@ -41,6 +41,59 @@ public class Session<T> {
         return Optional.of(result.get(0));
     }
 
+    private T executeInsert(Object entity, Field idField, boolean generatedOnDb) throws SQLException, IllegalAccessException {
+        String tableName = mapper.getTableName();
+        StringBuilder columns = new StringBuilder();
+        StringBuilder placeholders = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+
+        for (Field field : mapper.getEntityClass().getDeclaredFields()) {
+            field.setAccessible(true);
+
+            if (!field.isAnnotationPresent(Column.class) && !field.isAnnotationPresent(Id.class)) continue;
+
+            String colName = mapper.getColumnName(field.getName());
+
+            if (field.isAnnotationPresent(Id.class) && generatedOnDb) continue;
+
+            columns.append(colName).append(",");
+            placeholders.append("?,");
+            params.add(field.get(entity));
+        }
+
+        if (columns.length() > 0) {
+            columns.setLength(columns.length() - 1);
+            placeholders.setLength(placeholders.length() - 1);
+        }
+
+        String sql = String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columns, placeholders);
+        log.debug("Executing SQL: {}", sql);
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            for (int i = 0; i < params.size(); i++) {
+                stmt.setObject(i + 1, params.get(i));
+            }
+
+            int rowsAffected = stmt.executeUpdate();
+
+            if (rowsAffected > 0) {
+                if (generatedOnDb) {
+                    try (ResultSet rs = stmt.getGeneratedKeys()) {
+                        if (rs.next()) {
+                            Object generatedId = rs.getObject(1);
+                            idField.set(entity, generatedId);
+                            log.info("Entity saved with DB-generated ID: {}", generatedId);
+                        }
+                    }
+                } else {
+                    Object manualId = idField.get(entity);
+                    log.info("Entity saved with ORM-generated ID: {}", manualId);
+                }
+            }
+
+            return (T) entity;
+        }
+    }
 
     @SuppressWarnings("unchecked")
     public T save(Object entity) throws SQLException, IllegalAccessException {
@@ -49,15 +102,8 @@ public class Session<T> {
         Field idField = mapper.getIdField();
         idField.setAccessible(true);
 
-        Object idValue;
-        GeneratedValue gen;
-        try {
-            idValue = idField.get(entity);
-            gen = getGeneratedValue(idField);
-        } catch (IllegalAccessException e) {
-            log.error("Cannot access ID field", e);
-            throw new SQLException("Cannot access ID field", e);
-        }
+        GeneratedValue gen = getGeneratedValue(idField);
+        Object idValue = idField.get(entity);
 
         String tableName = mapper.getTableName();
         String idColumn = mapper.getIdColumn();
@@ -65,114 +111,36 @@ public class Session<T> {
         if (gen != null) {
             switch (gen.strategy()) {
                 case SEQUENCE:
-                    long seqVal = nextSequenceValue(tableName, idColumn);
+                    long seqVal = nextSequenceValue(tableName, idColumn, gen.startValue());
                     idField.set(entity, seqVal);
                     idValue = seqVal;
-                    log.info("SEQUENCE ID: {}", seqVal);
-                    break;
-
-                case CUSTOM:
-                    if (idValue == null) {
-                        throw new SQLException("CUSTOM strategy requires manual ID");
-                    }
-                    log.info("CUSTOM ID provided: {}", idValue);
                     break;
 
                 case PATTERN:
                     if (idField.getType() != String.class) {
-                        throw new SQLException("STARTS_WITH_PATTERN requires String ID field");
+                        throw new SQLException("PATTERN strategy requires String ID field");
                     }
                     String patternId = generateStartsWithId(gen.pattern(), gen.startValue(), tableName);
-                    try {
-                        idField.set(entity, patternId);
-                    } catch (IllegalAccessException e) {
-                        throw new SQLException("Cannot set pattern ID", e);
-                    }
+                    idField.set(entity, patternId);
                     idValue = patternId;
-                    log.info("STARTS_WITH_PATTERN ID: {}", patternId);
                     break;
 
                 case ALPHA:
-                    long alphaId = generateAlphaId(gen.startValue(), tableName);
+                    long alphaId = nextSequenceValue(tableName, idColumn, gen.startValue());
                     idField.set(entity, alphaId);
                     idValue = alphaId;
-                    log.info("ALPHA ID: {}", alphaId);
                     break;
 
-                case AUTO:
-                    if (idValue != null) {
-                        log.info("AUTO with manual ID: {}", idValue);
-                    }
+                case CUSTOM:
+                    if (idValue == null) throw new SQLException("CUSTOM strategy requires manual ID");
                     break;
 
-                case IDENTITY:
-                    break;
+                default: break;
             }
         }
 
         boolean generatedOnDb = isGeneratedOnDb(gen, idValue);
-
-        StringBuilder columns = new StringBuilder();
-        StringBuilder placeholders = new StringBuilder();
-        List<Object> params = new ArrayList<>();
-
-        for (Field field : mapper.getEntityClass().getDeclaredFields()) {
-            field.setAccessible(true);
-
-            if (field.isAnnotationPresent(Id.class)) {
-                if (generatedOnDb) {
-                    continue;
-                } else {
-                    columns.append(mapper.getColumnName(field.getName())).append(',');
-                    placeholders.append("?,");
-                    try {
-                        params.add(field.get(entity));
-                    } catch (IllegalAccessException e) {
-                        log.error("Cannot access ID field", e);
-                        throw new SQLException("Cannot access ID field", e);
-                    }
-                    continue;
-                }
-            }
-
-            try {
-                columns.append(mapper.getColumnName(field.getName())).append(',');
-                placeholders.append("?,");
-                params.add(field.get(entity));
-            } catch (IllegalAccessException e) {
-                log.error("Cannot access field {}", e, field.getName());
-                throw new SQLException("Cannot access field " + field.getName(), e);
-            }
-        }
-
-        if (columns.length() == 0) {
-            throw new SQLException("No columns to insert for " + tableName);
-        }
-        columns.deleteCharAt(columns.length() - 1);
-        placeholders.deleteCharAt(placeholders.length() - 1);
-
-        String sql = String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columns, placeholders);
-        log.debug("SQL: {}", sql);
-
-        try (PreparedStatement stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            for (int i = 0; i < params.size(); i++) {
-                stmt.setObject(i + 1, params.get(i));
-            }
-
-            int rows = stmt.executeUpdate();
-            log.info("Rows affected: {}", rows);
-
-            if (rows > 0 && generatedOnDb) {
-                try (ResultSet rs = stmt.getGeneratedKeys()) {
-                    if (rs.next()) {
-                        long dbId = rs.getLong(1);
-                        idField.set(entity, dbId);
-                        log.info("IDENTITY/AUTO ID from DB: {}", dbId);
-                    }
-                }
-            }
-            return (T) entity;
-        }
+        return executeInsert(entity, idField, generatedOnDb);
     }
 
     public void update(Object entity) throws SQLException {
@@ -270,15 +238,7 @@ public class Session<T> {
 
     private boolean isGeneratedOnDb(GeneratedValue gen, Object currentIdValue) {
         if (gen == null) return false;
-
-        switch (gen.strategy()) {
-            case IDENTITY:
-                return true;
-            case AUTO:
-                return currentIdValue == null;
-            default:
-                return false;
-        }
+        return gen.strategy() == Strategy.IDENTITY || (gen.strategy() == Strategy.AUTO && currentIdValue == null);
     }
 
     private long nextSequenceValue(String tableName, String idColumn) throws SQLException {
@@ -300,40 +260,65 @@ public class Session<T> {
     }
 
     private String generateStartsWithId(String pattern, long startsWith, String tableName) throws SQLException {
-        if (pattern.isEmpty()) {
-            pattern = tableName.toUpperCase() + "_";
-        }
-
-        String seqName = tableName + "_" + mapper.getIdColumn() + "_custom_seq";
-        String sql = String.format("SELECT nextval('%s')", seqName);
-
-        long nextNumber;
-        try (PreparedStatement stmt = connection.prepareStatement(sql);
-             ResultSet rs = stmt.executeQuery()) {
-            if (rs.next()) {
-                nextNumber = rs.getLong(1);
-            } else {
-                throw new SQLException("Cannot get next value from sequence " + seqName);
-            }
-        }
-
-        String id = pattern + nextNumber;
-        log.info("Generated STARTS_WITH_PATTERN: '{}' from sequence {} (next={})", id, seqName, nextNumber);
-        return id;
+        String p = (pattern == null || pattern.isEmpty()) ? tableName.toUpperCase() + "_" : pattern;
+        long nextNumber = nextSequenceValue(tableName, mapper.getIdColumn(), startsWith);
+        return p + nextNumber;
     }
 
     private long generateAlphaId(long startsWith, String tableName) throws SQLException {
         String seqName = tableName + "_" + mapper.getIdColumn() + "_custom_seq";
-        String sql = String.format("SELECT nextval('%s')", seqName);
 
-        try (PreparedStatement stmt = connection.prepareStatement(sql);
-             ResultSet rs = stmt.executeQuery()) {
+        return nextSequenceValue(tableName, mapper.getIdColumn(), startsWith);
+    }
+
+    private void ensureSequenceExists(String seqName, String tableName, String columnName, long startValue) throws SQLException {
+        String createSeq = String.format("CREATE SEQUENCE IF NOT EXISTS %s START WITH %d", seqName, startValue);
+        String alterSeq = String.format("ALTER SEQUENCE %s OWNED BY %s.%s", seqName, tableName, columnName);
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createSeq);
+            stmt.execute(alterSeq);
+        }
+    }
+
+    public void resetSequence() throws SQLException {
+        Field idField = mapper.getIdField();
+        GeneratedValue gen = getGeneratedValue(idField);
+
+        if (gen != null) {
+            String seqName = (mapper.getTableName() + "_" + mapper.getIdColumn() + "_seq").toLowerCase();
+            long startValue = gen.startValue();
+
+            log.info("Resetting sequence {} to {}", seqName, startValue);
+            String sql = String.format("ALTER SEQUENCE %s RESTART WITH %d", seqName, startValue);
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute(sql);
+            } catch (SQLException e) {
+                log.warn("Could not reset sequence (maybe it doesn't exist yet): {}", e.getMessage());
+            }
+        }
+    }
+
+    private long nextSequenceValue(String tableName, String idColumn, long startValue) throws SQLException {
+        String seqName = (tableName + "_" + idColumn + "_seq").toLowerCase();
+
+        String createSql = String.format(
+                "CREATE SEQUENCE IF NOT EXISTS %s START WITH %d; " +
+                        "ALTER SEQUENCE %s OWNED BY %s.%s",
+                seqName, startValue, seqName, tableName, idColumn
+        );
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createSql);
+        }
+
+        String sql = String.format("SELECT nextval('%s')", seqName);
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
             if (rs.next()) {
                 return rs.getLong(1);
             }
         }
-        throw new SQLException("Cannot get next value from sequence " + seqName);
+        throw new SQLException("Could not increment sequence: " + seqName);
     }
-
 }
-

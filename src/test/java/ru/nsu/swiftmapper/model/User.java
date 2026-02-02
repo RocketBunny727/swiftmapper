@@ -8,7 +8,7 @@ import ru.nsu.swiftmapper.annotations.*;
 @Data
 public class User {
     @Id
-    @GeneratedValue(strategy = Strategy.PATTERN, pattern = "USER_", startValue = 1001)
+    @GeneratedValue(strategy = Strategy.PATTERN, pattern = "USER_", startValue = 10001)
     @Column(name = "id")
     private String id;
 
