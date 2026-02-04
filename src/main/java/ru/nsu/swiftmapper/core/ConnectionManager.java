@@ -28,20 +28,6 @@ public class ConnectionManager {
         return new ConnectionManager(ds);
     }
 
-    public static ConnectionManager h2Memory() {
-        return new ConnectionManager(
-                "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=PostgreSQL",
-                "sa", ""
-        );
-    }
-
-    public static ConnectionManager postgresql(String host, int port, String db, String user, String pass) {
-        return new ConnectionManager(
-                String.format("jdbc:postgresql://%s:%d/%s", host, port, db),
-                user, pass
-        );
-    }
-
     private ConnectionManager(String url, String username, String password) {
         this.dsConfig = null;
         this.url = url;
@@ -97,7 +83,6 @@ public class ConnectionManager {
         GeneratedValue idGen = null;
         Field idField = null;
 
-        // 🔥 Находим @Id поле и его @GeneratedValue
         for (Field field : entityClass.getDeclaredFields()) {
             field.setAccessible(true);
             if (field.isAnnotationPresent(Id.class)) {

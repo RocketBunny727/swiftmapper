@@ -1,36 +1,36 @@
 package ru.nsu.swiftmapper;
 
 import ru.nsu.swiftmapper.core.ConnectionManager;
-import ru.nsu.swiftmapper.model.Pet;
 import ru.nsu.swiftmapper.model.User;
+import ru.nsu.swiftmapper.model.UserRepository;
+import ru.nsu.swiftmapper.repository.query.QueryRepositoryFactory;
 
 import java.sql.SQLException;
+import java.util.List;
+import java.util.Optional;
 
 public class SwiftMapperTest {
     public static void main(String[] args) throws SQLException {
-        ConnectionManager cm = ConnectionManager.fromConfig() // спрятать логику от пользователя
-                .connect()
+        ConnectionManager cm = ConnectionManager.fromConfig()
                 .initSchema(User.class)
-                .initSchema(Pet.class);// должны подгружаться все @Entity
+                .connect();
+        UserRepository repo = QueryRepositoryFactory.create(
+                UserRepository.class,
+                User.class,
+                cm.connection()
+        );
 
-        var repoU = cm.repository(User.class); // спрятать логику от пользователя
-        var repoP = cm.repository(Pet.class);
+        List<User> adults = repo.findByAgeGreaterThan(18);
+        List<User> children = repo.findByAgeLessThan(18);
 
-        for (int i = 0; i < 10; i++) {
-            User user = new User();
-            user.setUsername("username" + (i + 1));
-            user.setEmail("user" + (i + 1) + "@gmail.com");
+        System.out.println("adults: " + adults);
+        System.out.println("children: " + children);
 
-            repoU.save(user);
+        Optional<User> curr = repo.findByEmail("username4@gmail.com");
+        if (curr.isPresent()) {
+            System.out.println(curr.get().toString());
+        } else {
+            System.out.println("No user found");
         }
-
-        for (int i = 0; i < 10; i++) {
-            Pet pet = new Pet();
-            pet.setName("pet_" + (i + 1));
-
-            repoP.save(pet);
-        }
-
-        cm.close();
     }
 }
