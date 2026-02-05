@@ -1,4 +1,4 @@
-package ru.nsu.swiftmapper.annotations;
+package ru.nsu.swiftmapper.annotations.relationship;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -7,7 +7,8 @@ import java.lang.annotation.Target;
 
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)
-public @interface Column {
-    String name() default "";
-    String sqlType() default "";
+public @interface ManyToMany {
+    String mappedBy() default "";
+    CascadeType[] cascade() default {};
+    FetchType fetch() default FetchType.LAZY;
 }

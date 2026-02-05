@@ -1,4 +1,4 @@
-package ru.nsu.swiftmapper.annotations;
+package ru.nsu.swiftmapper.annotations.entity;
 
 public enum Strategy {
     IDENTITY,

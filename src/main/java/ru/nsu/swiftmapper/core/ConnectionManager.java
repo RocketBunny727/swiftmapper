@@ -1,6 +1,7 @@
 package ru.nsu.swiftmapper.core;
 
-import ru.nsu.swiftmapper.annotations.*;
+import ru.nsu.swiftmapper.annotations.entity.*;
+import ru.nsu.swiftmapper.annotations.relationship.*;
 import ru.nsu.swiftmapper.config.ConfigReader;
 import ru.nsu.swiftmapper.logger.SwiftLogger;
 import ru.nsu.swiftmapper.repository.SwiftRepository;
@@ -76,10 +77,11 @@ public class ConnectionManager {
             throw new IllegalArgumentException(entityClass + " must be @Entity");
         }
 
-        EntityMapper<?> mapper = new EntityMapper<>(entityClass);
+        EntityMapper<?> mapper = new EntityMapper<>(entityClass, connection);
         String tableName = mapper.getTableName();
 
         List<String> columns = new ArrayList<>();
+        List<String> foreignKeys = new ArrayList<>();
         GeneratedValue idGen = null;
         Field idField = null;
 
@@ -95,6 +97,8 @@ public class ConnectionManager {
         for (Field field : entityClass.getDeclaredFields()) {
             field.setAccessible(true);
 
+            if (field.isAnnotationPresent(Transient.class)) continue;
+
             if (field.isAnnotationPresent(Id.class)) {
                 String colDef = createIdColumnDefinition(mapper.getIdColumn(), idField, idGen);
                 columns.add(colDef);
@@ -103,11 +107,51 @@ public class ConnectionManager {
                         idGen.strategy() == Strategy.ALPHA)) {
                     createCustomSequence(tableName, mapper.getIdColumn(), idGen.startValue());
                 }
-            } else if (field.isAnnotationPresent(Column.class)) {
-                String colName = field.isAnnotationPresent(Column.class) ?
-                        field.getAnnotation(Column.class).name() : field.getName();
-                String colDef = colName + " " + getSqlType(field, false, null) + " NOT NULL";
-                columns.add(colDef);
+            } else if (field.isAnnotationPresent(ManyToOne.class)) {
+                JoinColumn jc = field.getAnnotation(JoinColumn.class);
+                String fkColumn = jc != null && !jc.name().isEmpty() ?
+                        jc.name() : field.getName().toLowerCase() + "_id";
+
+                Class<?> targetClass = field.getType();
+                String targetIdType = getTargetIdSqlType(targetClass);
+
+                columns.add(fkColumn + " " + targetIdType);
+
+                EntityMapper<?> targetMapper = new EntityMapper<>(targetClass, connection);
+                String targetTable = targetMapper.getTableName();
+                String referencedCol = jc != null && !jc.referencedColumnName().isEmpty() ?
+                        jc.referencedColumnName() : targetMapper.getIdColumn();
+
+                foreignKeys.add(String.format(
+                        "ALTER TABLE %s ADD CONSTRAINT fk_%s_%s FOREIGN KEY (%s) REFERENCES %s(%s)",
+                        tableName, tableName, fkColumn, fkColumn, targetTable, referencedCol
+                ));
+            } else if (field.isAnnotationPresent(OneToOne.class)) {
+                OneToOne oo = field.getAnnotation(OneToOne.class);
+                if (oo.mappedBy().isEmpty()) {
+                    JoinColumn jc = field.getAnnotation(JoinColumn.class);
+                    String fkColumn = jc != null && !jc.name().isEmpty() ?
+                            jc.name() : field.getName().toLowerCase() + "_id";
+
+                    Class<?> targetClass = field.getType();
+                    String targetIdType = getTargetIdSqlType(targetClass);
+
+                    columns.add(fkColumn + " " + targetIdType);
+
+                    EntityMapper<?> targetMapper = new EntityMapper<>(targetClass, connection);
+                    String targetTable = targetMapper.getTableName();
+                    String referencedCol = jc != null && !jc.referencedColumnName().isEmpty() ?
+                            jc.referencedColumnName() : targetMapper.getIdColumn();
+
+                    foreignKeys.add(String.format(
+                            "ALTER TABLE %s ADD CONSTRAINT fk_%s_%s FOREIGN KEY (%s) REFERENCES %s(%s)",
+                            tableName, tableName, fkColumn, fkColumn, targetTable, referencedCol
+                    ));
+                }
+            } else if (!isRelationshipField(field)) {
+                String colName = getColumnName(field);
+                String sqlType = getSqlType(field, false, null);
+                columns.add(colName + " " + sqlType);
             }
         }
 
@@ -119,6 +163,62 @@ public class ConnectionManager {
             stmt.execute(sql.toString());
             log.info("Created table: {}", tableName);
         }
+
+        for (String fkSql : foreignKeys) {
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute(fkSql);
+                log.info("Created FK: {}", fkSql);
+            } catch (SQLException e) {
+                log.warn("FK may already exist or error: {}", e.getMessage());
+            }
+        }
+    }
+
+    private String getTargetIdSqlType(Class<?> targetClass) {
+        Field idField = null;
+        GeneratedValue gen = null;
+
+        for (Field field : targetClass.getDeclaredFields()) {
+            if (field.isAnnotationPresent(Id.class)) {
+                idField = field;
+                gen = field.getAnnotation(GeneratedValue.class);
+                break;
+            }
+        }
+
+        if (idField == null) {
+            return "BIGINT";
+        }
+
+        if (gen != null && gen.strategy() == Strategy.PATTERN) {
+            return "VARCHAR(100)";
+        }
+
+        Class<?> type = idField.getType();
+        if (type == String.class) {
+            return "VARCHAR(255)";
+        } else if (type == Long.class || type == long.class) {
+            return "BIGINT";
+        } else if (type == Integer.class || type == int.class) {
+            return "INTEGER";
+        }
+
+        return "BIGINT";
+    }
+
+    private boolean isRelationshipField(Field field) {
+        return field.isAnnotationPresent(OneToOne.class) ||
+                field.isAnnotationPresent(OneToMany.class) ||
+                field.isAnnotationPresent(ManyToOne.class) ||
+                field.isAnnotationPresent(ManyToMany.class);
+    }
+
+    private String getColumnName(Field field) {
+        if (field.isAnnotationPresent(Column.class)) {
+            String name = field.getAnnotation(Column.class).name();
+            if (!name.isEmpty()) return name;
+        }
+        return field.getName().toLowerCase();
     }
 
     private String createIdColumnDefinition(String idColumn, Field idField, GeneratedValue gen) {
@@ -192,5 +292,44 @@ public class ConnectionManager {
 
     public <T> SwiftRepository<T, Long> repository(Class<T> entityClass) {
         return new SwiftRepository<>(connection, entityClass);
+    }
+
+    private void createForeignKeys(Class<?> entityClass) throws SQLException {
+        for (Field field : entityClass.getDeclaredFields()) {
+            if (field.isAnnotationPresent(ManyToOne.class) ||
+                    (field.isAnnotationPresent(OneToOne.class) &&
+                            field.getAnnotation(OneToOne.class).mappedBy().isEmpty())) {
+
+                JoinColumn jc = field.getAnnotation(JoinColumn.class);
+                if (jc == null) continue;
+
+                String fkName = jc.name().isEmpty() ?
+                        field.getName().toLowerCase() + "_id" : jc.name();
+                String targetTable = field.getType().getAnnotation(Table.class).name();
+                if (targetTable.isEmpty()) targetTable = field.getType().getSimpleName().toLowerCase();
+
+                EntityMapper<?> targetMapper = new EntityMapper<>(field.getType(), connection);
+                String referencedCol = jc.referencedColumnName();
+
+                String sql = String.format(
+                        "ALTER TABLE %s ADD CONSTRAINT fk_%s_%s FOREIGN KEY (%s) REFERENCES %s(%s)",
+                        getTableName(entityClass), getTableName(entityClass), fkName,
+                        fkName, targetTable, referencedCol
+                );
+
+                try (Statement stmt = connection.createStatement()) {
+                    stmt.execute(sql);
+                    log.info("Created FK: {}", fkName);
+                } catch (SQLException e) {
+                    log.warn("FK may already exist: {}", e.getMessage());
+                }
+            }
+        }
+    }
+
+    private String getTableName(Class<?> clazz) {
+        Table table = clazz.getAnnotation(Table.class);
+        return table != null && !table.name().isEmpty() ? table.name()
+                : clazz.getSimpleName().toLowerCase();
     }
 }

@@ -2,11 +2,11 @@ package ru.nsu.swiftmapper.repository.query;
 
 import ru.nsu.swiftmapper.core.EntityMapper;
 import ru.nsu.swiftmapper.core.Session;
+import ru.nsu.swiftmapper.query.ParameterBinding;
+import ru.nsu.swiftmapper.query.ParsedQuery;
 import ru.nsu.swiftmapper.query.QueryMethodParser;
+import ru.nsu.swiftmapper.query.QueryType;
 import ru.nsu.swiftmapper.repository.Repository;
-import ru.nsu.swiftmapper.query.QueryMethodParser.QueryType;
-import ru.nsu.swiftmapper.query.QueryMethodParser.ParsedQuery;
-import ru.nsu.swiftmapper.query.QueryMethodParser.ParameterBinding;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -43,7 +43,7 @@ public class QueryRepositoryFactory {
                                       Class<?> repositoryInterface) {
             this.connection = connection;
             this.entityClass = entityClass;
-            this.mapper = new EntityMapper<>(entityClass);
+            this.mapper = new EntityMapper<>(entityClass, connection);
             this.parser = new QueryMethodParser(mapper);
             this.methodHandlers = new HashMap<>();
 

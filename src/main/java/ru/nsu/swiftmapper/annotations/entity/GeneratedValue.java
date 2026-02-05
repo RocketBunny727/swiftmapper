@@ -1,4 +1,4 @@
-package ru.nsu.swiftmapper.annotations;
+package ru.nsu.swiftmapper.annotations.entity;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

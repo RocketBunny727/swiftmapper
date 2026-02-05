@@ -19,27 +19,40 @@ public class QueryMethodParser {
 
     private static final List<TokenPattern> CONDITION_PATTERNS = List.of(
             new TokenPattern("Between", " BETWEEN ? AND ?", 2),
+            new TokenPattern("GreaterThanEquals", " >= ?", 1),
             new TokenPattern("GreaterThanEqual", " >= ?", 1),
+            new TokenPattern("Gte", " >= ?", 1),
+            new TokenPattern("GTE", " >= ?", 1),
             new TokenPattern("GreaterThan", " > ?", 1),
+            new TokenPattern("Gt", " > ?", 1),
+            new TokenPattern("GT", " >= ?", 1),
+            new TokenPattern("LessThanEquals", " <= ?", 1),
             new TokenPattern("LessThanEqual", " <= ?", 1),
+            new TokenPattern("Lte", " <= ?", 1),
+            new TokenPattern("LTE", " >= ?", 1),
             new TokenPattern("LessThan", " < ?", 1),
+            new TokenPattern("Lt", " < ?", 1),
+            new TokenPattern("LT", " >= ?", 1),
             new TokenPattern("StartingWith", " LIKE ? || '%'", 1, arg -> arg + "%"),
             new TokenPattern("EndingWith", " LIKE '%' || ?", 1, arg -> "%" + arg),
             new TokenPattern("Containing", " LIKE '%' || ? || '%'", 1, arg -> "%" + arg + "%"),
             new TokenPattern("Like", " LIKE ?", 1),
             new TokenPattern("NotLike", " NOT LIKE ?", 1),
+            new TokenPattern("Regex", " ~ ?", 1),
             new TokenPattern("NotIn", " NOT IN (", -1, ")", true),
+            new TokenPattern("Nin", " NOT IN (", -1, ")", true),
             new TokenPattern("In", " IN (", -1, ")", true),
             new TokenPattern("NotNull", " IS NOT NULL", 0),
             new TokenPattern("Null", " IS NULL", 0),
+            new TokenPattern("NotEquals", " <> ?", 1),
+            new TokenPattern("NotEqual", " <> ?", 1),
+            new TokenPattern("Ne", " <> ?", 1),
+            new TokenPattern("NE", " <> ?", 1),
             new TokenPattern("Not", " <> ?", 1),
             new TokenPattern("True", " = true", 0),
             new TokenPattern("False", " = false", 0),
+            new TokenPattern("Exists", " EXISTS (?)", 1),
             new TokenPattern("Equals", " = ?", 1)
-    );
-
-    private static final Pattern LOGICAL_PATTERN = Pattern.compile(
-            "(And|Or)(?=[A-Z])"
     );
 
     private static final Pattern ORDER_PATTERN = Pattern.compile(
@@ -56,7 +69,8 @@ public class QueryMethodParser {
 
         Matcher matcher = METHOD_PATTERN.matcher(methodName);
         if (!matcher.matches()) {
-            throw new IllegalArgumentException("Invalid query method name: " + methodName);
+            throw new IllegalArgumentException("Invalid query method name: " + methodName +
+                    ". Expected pattern: findBy..., countBy..., deleteBy..., existsBy...");
         }
 
         String operation = matcher.group(1);
@@ -64,9 +78,13 @@ public class QueryMethodParser {
         String conditionsPart = matcher.group(4);
 
         OrderClause orderClause = parseOrderBy(conditionsPart);
-        String conditionsWithoutOrder = orderClause != null
-                ? conditionsPart.substring(0, conditionsPart.indexOf("OrderBy"))
-                : conditionsPart;
+        String conditionsWithoutOrder;
+        if (orderClause != null) {
+            int orderIndex = conditionsPart.indexOf("OrderBy");
+            conditionsWithoutOrder = conditionsPart.substring(0, orderIndex);
+        } else {
+            conditionsWithoutOrder = conditionsPart;
+        }
 
         StringBuilder sql = new StringBuilder();
         List<ParameterBinding> bindings = new ArrayList<>();
@@ -105,9 +123,7 @@ public class QueryMethodParser {
         List<String> tokens = splitConditions(conditions);
 
         int paramIndex = 0;
-        for (int i = 0; i < tokens.size(); i++) {
-            String token = tokens.get(i);
-
+        for (String token : tokens) {
             if (token.equals("And")) {
                 sql.append(" AND ");
                 continue;
@@ -118,30 +134,26 @@ public class QueryMethodParser {
 
             PropertyCondition propCond = parsePropertyCondition(token);
             String columnName = mapper.getColumnName(propCond.property());
+            TokenPattern operator = propCond.operator();
 
-            if (propCond.operator().params() == 0) {
-                sql.append(columnName).append(propCond.operator().sql());
+            if (operator.params() == 0) {
+                sql.append(columnName).append(operator.sql());
             } else {
-                sql.append(columnName).append(propCond.operator().sql());
+                sql.append(columnName).append(operator.sql());
 
-                int paramsNeeded = propCond.operator().params();
+                int paramsNeeded = operator.params();
                 if (paramsNeeded == -1) {
-                    if (args[paramIndex] instanceof List<?> list) {
-                        String placeholders = String.join(", ",
-                                java.util.Collections.nCopies(list.size(), "?"));
-                        int insertPos = sql.lastIndexOf("(");
-                        sql.insert(insertPos + 1, placeholders);
-                        for (Object item : list) {
-                            bindings.add(new ParameterBinding(paramIndex++, item));
-                        }
-                    } else {
-                        bindings.add(new ParameterBinding(paramIndex++, args[paramIndex]));
+                    handleVarargOperator(sql, bindings, args, paramIndex, columnName);
+                    if (args[paramIndex] instanceof List) {
+                        paramIndex++;
+                    } else if (args[paramIndex].getClass().isArray()) {
+                        paramIndex++;
                     }
                 } else {
                     for (int j = 0; j < paramsNeeded; j++) {
                         Object value = args[paramIndex++];
-                        if (propCond.operator().transformer() != null) {
-                            value = propCond.operator().transformer().apply(value);
+                        if (operator.transformer() != null) {
+                            value = operator.transformer().apply(value);
                         }
                         bindings.add(new ParameterBinding(paramIndex - 1, value));
                     }
@@ -152,22 +164,68 @@ public class QueryMethodParser {
         return new WhereClause(sql.toString(), bindings);
     }
 
+    private void handleVarargOperator(StringBuilder sql, List<ParameterBinding> bindings,
+                                      Object[] args, int paramIndex, String columnName) {
+        Object arg = args[paramIndex];
+        boolean isEmpty = false;
+        List<?> items = null;
+        Object[] array = null;
+        int size = 0;
+
+        if (arg instanceof List<?> list) {
+            items = list;
+            size = list.size();
+            isEmpty = list.isEmpty();
+        } else if (arg.getClass().isArray()) {
+            array = (Object[]) arg;
+            size = array.length;
+            isEmpty = array.length == 0;
+        }
+
+        if (isEmpty) {
+            String currentSql = sql.toString();
+            if (currentSql.endsWith(" IN (")) {
+                int replaceStart = currentSql.lastIndexOf(columnName);
+                sql.replace(replaceStart, sql.length(), "1=0");
+            } else if (currentSql.endsWith(" NOT IN (")) {
+                int replaceStart = currentSql.lastIndexOf(columnName);
+                sql.replace(replaceStart, sql.length(), "1=1");
+            }
+        } else {
+            String placeholders = String.join(", ",
+                    java.util.Collections.nCopies(size, "?"));
+            int insertPos = sql.lastIndexOf("(");
+            sql.insert(insertPos + 1, placeholders);
+
+            if (items != null) {
+                for (Object item : items) {
+                    bindings.add(new ParameterBinding(paramIndex++, item));
+                }
+            } else {
+                assert array != null;
+                for (Object item : array) {
+                    bindings.add(new ParameterBinding(paramIndex++, item));
+                }
+            }
+        }
+    }
+
     private List<String> splitConditions(String conditions) {
         List<String> tokens = new ArrayList<>();
         StringBuilder current = new StringBuilder();
 
         for (int i = 0; i < conditions.length(); ) {
             if (conditions.startsWith("And", i) && i + 3 < conditions.length()
-                    && Character.isUpperCase(conditions.charAt(i + 3))) {
-                if (current.length() > 0) {
+                    && (i + 3 == conditions.length() || Character.isUpperCase(conditions.charAt(i + 3)))) {
+                if (!current.isEmpty()) {
                     tokens.add(current.toString());
                     current = new StringBuilder();
                 }
                 tokens.add("And");
                 i += 3;
             } else if (conditions.startsWith("Or", i) && i + 2 < conditions.length()
-                    && Character.isUpperCase(conditions.charAt(i + 2))) {
-                if (current.length() > 0) {
+                    && (i + 2 == conditions.length() || Character.isUpperCase(conditions.charAt(i + 2)))) {
+                if (!current.isEmpty()) {
                     tokens.add(current.toString());
                     current = new StringBuilder();
                 }
@@ -179,7 +237,7 @@ public class QueryMethodParser {
             }
         }
 
-        if (current.length() > 0) {
+        if (!current.isEmpty()) {
             tokens.add(current.toString());
         }
 
@@ -190,8 +248,15 @@ public class QueryMethodParser {
         for (TokenPattern pattern : CONDITION_PATTERNS) {
             String suffix = pattern.name();
             if (token.endsWith(suffix)) {
-                String property = token.substring(0, token.length() - suffix.length());
-                return new PropertyCondition(property, pattern);
+                int suffixStart = token.length() - suffix.length();
+                if (suffixStart == 0 ||
+                        (suffixStart > 0 && Character.isUpperCase(token.charAt(suffixStart)))) {
+                    String property = token.substring(0, suffixStart);
+                    if (property.isEmpty()) {
+                        return new PropertyCondition(token, new TokenPattern("Equals", " = ?", 1));
+                    }
+                    return new PropertyCondition(property, pattern);
+                }
             }
         }
 
@@ -222,52 +287,10 @@ public class QueryMethodParser {
 
     private QueryType determineQueryType(String operation) {
         return switch (operation) {
-            case "find", "findAll", "findFirst", "findTop" -> QueryType.SELECT;
             case "count" -> QueryType.COUNT;
             case "delete" -> QueryType.DELETE;
             case "exists" -> QueryType.EXISTS;
             default -> QueryType.SELECT;
         };
-    }
-
-    public record ParsedQuery(String sql, List<ParameterBinding> bindings,
-                              QueryType queryType, boolean singleResult) {}
-    public record ParameterBinding(int index, Object value) {}
-    private record WhereClause(String sql, List<ParameterBinding> bindings) {}
-    private record OrderClause(String sql) {}
-    private record PropertyCondition(String property, TokenPattern operator) {}
-
-    public enum QueryType { SELECT, COUNT, DELETE, EXISTS }
-
-    private static class TokenPattern {
-        private final String name;
-        private final String sql;
-        private final int params;
-        private final java.util.function.Function<Object, Object> transformer;
-        private final String closingBracket;
-        private final boolean isVararg;
-
-        TokenPattern(String name, String sql, int params) {
-            this(name, sql, params, null, false);
-        }
-
-        TokenPattern(String name, String sql, int params,
-                     java.util.function.Function<Object, Object> transformer) {
-            this(name, sql, params, null, false);
-        }
-
-        TokenPattern(String name, String sql, int params, String closingBracket, boolean isVararg) {
-            this.name = name;
-            this.sql = sql;
-            this.params = params;
-            this.transformer = null;
-            this.closingBracket = closingBracket;
-            this.isVararg = isVararg;
-        }
-
-        public String name() { return name; }
-        public String sql() { return sql + (closingBracket != null ? closingBracket : ""); }
-        public int params() { return params; }
-        public java.util.function.Function<Object, Object> transformer() { return transformer; }
     }
 }

@@ -1,7 +1,7 @@
 package ru.nsu.swiftmapper.core;
 
-import ru.nsu.swiftmapper.annotations.*;
-
+import ru.nsu.swiftmapper.annotations.entity.*;
+import ru.nsu.swiftmapper.annotations.relationship.*;
 import ru.nsu.swiftmapper.logger.SwiftLogger;
 
 import java.lang.reflect.Field;
@@ -17,7 +17,7 @@ public class Session<T> {
 
     public Session(Connection connection, Class<T> entityClass) {
         this.connection = connection;
-        this.mapper = new EntityMapper<>(entityClass);
+        this.mapper = new EntityMapper<>(entityClass, connection);
         log.info("Session created for {}", entityClass.getSimpleName());
     }
 
@@ -50,21 +50,74 @@ public class Session<T> {
         for (Field field : mapper.getEntityClass().getDeclaredFields()) {
             field.setAccessible(true);
 
-            if (!field.isAnnotationPresent(Column.class) && !field.isAnnotationPresent(Id.class)) continue;
+            if (field.isAnnotationPresent(Transient.class)) continue;
+            if (isRelationshipField(field)) {
+                if (field.isAnnotationPresent(ManyToOne.class)) {
+                    Object relatedEntity = field.get(entity);
+                    if (relatedEntity != null) {
+                        Object relatedId = getEntityId(relatedEntity);
+                        if (relatedId != null) {
+                            JoinColumn jc = field.getAnnotation(JoinColumn.class);
+                            String fkColumn = jc != null && !jc.name().isEmpty() ?
+                                    jc.name() : field.getName().toLowerCase() + "_id";
+
+                            columns.append(fkColumn).append(",");
+                            placeholders.append("?,");
+                            params.add(relatedId);
+                        }
+                    }
+                }
+                else if (field.isAnnotationPresent(OneToOne.class)) {
+                    OneToOne oo = field.getAnnotation(OneToOne.class);
+                    if (oo.mappedBy().isEmpty()) {
+                        Object relatedEntity = field.get(entity);
+                        if (relatedEntity != null) {
+                            Object relatedId = getEntityId(relatedEntity);
+                            if (relatedId != null) {
+                                JoinColumn jc = field.getAnnotation(JoinColumn.class);
+                                String fkColumn = jc != null && !jc.name().isEmpty() ?
+                                        jc.name() : field.getName().toLowerCase() + "_id";
+
+                                columns.append(fkColumn).append(",");
+                                placeholders.append("?,");
+                                params.add(relatedId);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if (field.isAnnotationPresent(Id.class) && generatedOnDb) continue;
 
             String colName = mapper.getColumnName(field.getName());
-
-            if (field.isAnnotationPresent(Id.class) && generatedOnDb) continue;
+            Object value = field.get(entity);
 
             columns.append(colName).append(",");
             placeholders.append("?,");
-            params.add(field.get(entity));
+            params.add(value);
         }
 
-        if (columns.length() > 0) {
-            columns.setLength(columns.length() - 1);
-            placeholders.setLength(placeholders.length() - 1);
+        if (columns.isEmpty()) {
+            String sql = String.format("INSERT INTO %s DEFAULT VALUES", tableName);
+            log.debug("Executing SQL: {}", sql);
+
+            try (PreparedStatement stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                int rowsAffected = stmt.executeUpdate();
+                if (rowsAffected > 0 && generatedOnDb) {
+                    try (ResultSet rs = stmt.getGeneratedKeys()) {
+                        if (rs.next()) {
+                            Object generatedId = rs.getObject(1);
+                            idField.set(entity, generatedId);
+                            log.info("Entity saved with DB-generated ID: {}", generatedId);
+                        }
+                    }
+                }
+                return (T) entity;
+            }
         }
+
+        columns.setLength(columns.length() - 1);
+        placeholders.setLength(placeholders.length() - 1);
 
         String sql = String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columns, placeholders);
         log.debug("Executing SQL: {}", sql);
@@ -93,6 +146,26 @@ public class Session<T> {
 
             return (T) entity;
         }
+    }
+
+    private Object getEntityId(Object entity) throws IllegalAccessException {
+        if (entity == null) return null;
+
+        Class<?> clazz = entity.getClass();
+        for (Field field : clazz.getDeclaredFields()) {
+            if (field.isAnnotationPresent(Id.class)) {
+                field.setAccessible(true);
+                return field.get(entity);
+            }
+        }
+        return null;
+    }
+
+    private boolean isRelationshipField(Field field) {
+        return field.isAnnotationPresent(OneToOne.class) ||
+                field.isAnnotationPresent(OneToMany.class) ||
+                field.isAnnotationPresent(ManyToOne.class) ||
+                field.isAnnotationPresent(ManyToMany.class);
     }
 
     @SuppressWarnings("unchecked")
