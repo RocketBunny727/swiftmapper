@@ -1,4 +1,4 @@
-package ru.nsu.swiftmapper.query;
+package ru.nsu.swiftmapper.query.model;
 
 import java.util.function.Function;
 

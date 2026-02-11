@@ -1,4 +1,4 @@
-package ru.nsu.swiftmapper.logger;
+package ru.nsu.swiftmapper.utils.logger;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;

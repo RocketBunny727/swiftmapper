@@ -1,10 +1,16 @@
 package ru.nsu.swiftmapper.query;
 
+import ru.nsu.swiftmapper.annotations.entity.Column;
+import ru.nsu.swiftmapper.annotations.relationship.JoinColumn;
 import ru.nsu.swiftmapper.core.EntityMapper;
-import ru.nsu.swiftmapper.logger.SwiftLogger;
+import ru.nsu.swiftmapper.utils.logger.SwiftLogger;
+import ru.nsu.swiftmapper.query.model.*;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -22,17 +28,13 @@ public class QueryMethodParser {
             new TokenPattern("GreaterThanEquals", " >= ?", 1),
             new TokenPattern("GreaterThanEqual", " >= ?", 1),
             new TokenPattern("Gte", " >= ?", 1),
-            new TokenPattern("GTE", " >= ?", 1),
             new TokenPattern("GreaterThan", " > ?", 1),
             new TokenPattern("Gt", " > ?", 1),
-            new TokenPattern("GT", " >= ?", 1),
             new TokenPattern("LessThanEquals", " <= ?", 1),
             new TokenPattern("LessThanEqual", " <= ?", 1),
             new TokenPattern("Lte", " <= ?", 1),
-            new TokenPattern("LTE", " >= ?", 1),
             new TokenPattern("LessThan", " < ?", 1),
             new TokenPattern("Lt", " < ?", 1),
-            new TokenPattern("LT", " >= ?", 1),
             new TokenPattern("StartingWith", " LIKE ? || '%'", 1, arg -> arg + "%"),
             new TokenPattern("EndingWith", " LIKE '%' || ?", 1, arg -> "%" + arg),
             new TokenPattern("Containing", " LIKE '%' || ? || '%'", 1, arg -> "%" + arg + "%"),
@@ -45,9 +47,7 @@ public class QueryMethodParser {
             new TokenPattern("NotNull", " IS NOT NULL", 0),
             new TokenPattern("Null", " IS NULL", 0),
             new TokenPattern("NotEquals", " <> ?", 1),
-            new TokenPattern("NotEqual", " <> ?", 1),
             new TokenPattern("Ne", " <> ?", 1),
-            new TokenPattern("NE", " <> ?", 1),
             new TokenPattern("Not", " <> ?", 1),
             new TokenPattern("True", " = true", 0),
             new TokenPattern("False", " = false", 0),
@@ -88,14 +88,26 @@ public class QueryMethodParser {
 
         StringBuilder sql = new StringBuilder();
         List<ParameterBinding> bindings = new ArrayList<>();
+        List<JoinInfo> joins = new ArrayList<>();
 
         QueryType queryType = determineQueryType(operation);
 
-        sql.append(buildSelectClause(queryType));
-        sql.append(" FROM ").append(mapper.getTableName());
-
+        WhereClause whereClause = null;
         if (!conditionsWithoutOrder.isEmpty()) {
-            WhereClause whereClause = parseWhereClause(conditionsWithoutOrder, method, args);
+            whereClause = parseWhereClause(conditionsWithoutOrder, method, args, joins);
+        }
+
+        sql.append(buildSelectClause(queryType));
+        sql.append(" FROM ").append(mapper.getTableName()).append(" t0");
+
+        for (int i = 0; i < joins.size(); i++) {
+            JoinInfo join = joins.get(i);
+            sql.append(" LEFT JOIN ").append(join.tableName()).append(" t").append(i + 1)
+                    .append(" ON t0.").append(join.foreignKey()).append(" = t")
+                    .append(i + 1).append(".").append(join.primaryKey());
+        }
+
+        if (whereClause != null) {
             sql.append(" WHERE ").append(whereClause.sql());
             bindings.addAll(whereClause.bindings());
         }
@@ -116,13 +128,15 @@ public class QueryMethodParser {
                 operation.equals("findFirst") || !topCount.isEmpty());
     }
 
-    private WhereClause parseWhereClause(String conditions, Method method, Object[] args) {
+    private WhereClause parseWhereClause(String conditions, Method method, Object[] args,
+                                         List<JoinInfo> joins) {
         StringBuilder sql = new StringBuilder();
         List<ParameterBinding> bindings = new ArrayList<>();
 
         List<String> tokens = splitConditions(conditions);
 
         int paramIndex = 0;
+
         for (String token : tokens) {
             if (token.equals("And")) {
                 sql.append(" AND ");
@@ -132,40 +146,174 @@ public class QueryMethodParser {
                 continue;
             }
 
-            PropertyCondition propCond = parsePropertyCondition(token);
-            String columnName = mapper.getColumnName(propCond.property());
-            TokenPattern operator = propCond.operator();
+            NestedField nested = parseNestedField(token);
 
-            if (operator.params() == 0) {
-                sql.append(columnName).append(operator.sql());
-            } else {
-                sql.append(columnName).append(operator.sql());
+            if (nested != null) {
+                String alias = "t" + (joins.size() + 1);
+                String tableName = getTableName(nested.entityClass());
 
-                int paramsNeeded = operator.params();
-                if (paramsNeeded == -1) {
-                    handleVarargOperator(sql, bindings, args, paramIndex, columnName);
-                    if (args[paramIndex] instanceof List) {
-                        paramIndex++;
-                    } else if (args[paramIndex].getClass().isArray()) {
-                        paramIndex++;
-                    }
+                JoinInfo existingJoin = findExistingJoin(joins, nested.foreignKey());
+                if (existingJoin == null) {
+                    joins.add(new JoinInfo(tableName, nested.foreignKey(), nested.primaryKey()));
+                    alias = "t" + joins.size();
                 } else {
-                    for (int j = 0; j < paramsNeeded; j++) {
-                        Object value = args[paramIndex++];
-                        if (operator.transformer() != null) {
-                            value = operator.transformer().apply(value);
-                        }
-                        bindings.add(new ParameterBinding(paramIndex - 1, value));
-                    }
+                    alias = "t" + (joins.indexOf(existingJoin) + 1);
                 }
+
+                PropertyCondition propCond = parsePropertyCondition(nested.propertyCondition());
+                String columnName = getActualColumnName(nested.entityClass(), nested.propertyName());
+
+                buildCondition(sql, bindings, args, alias + "." + columnName,
+                        propCond.operator(), paramIndex);
+                paramIndex += propCond.operator().params() == -1 ? 1 : Math.max(1, propCond.operator().params());
+
+            } else {
+                PropertyCondition propCond = parsePropertyCondition(token);
+                String columnName = getActualColumnName(mapper.getEntityClass(), propCond.property());
+
+                buildCondition(sql, bindings, args, "t0." + columnName, propCond.operator(), paramIndex);
+                paramIndex += propCond.operator().params() == -1 ? 1 : Math.max(1, propCond.operator().params());
             }
         }
 
         return new WhereClause(sql.toString(), bindings);
     }
 
+    private String getActualColumnName(Class<?> entityClass, String propertyName) {
+        String searchName = propertyName.toLowerCase();
+
+        for (Field field : entityClass.getDeclaredFields()) {
+            String fieldName = field.getName();
+            String normalizedFieldName = fieldName.toLowerCase().replace("_", "");
+            String normalizedSearchName = searchName.replace("_", "");
+
+            if (normalizedFieldName.equals(normalizedSearchName) ||
+                    fieldName.equalsIgnoreCase(propertyName)) {
+
+                if (field.isAnnotationPresent(Column.class)) {
+                    String colName = field.getAnnotation(Column.class).name();
+                    if (colName != null && !colName.isEmpty()) {
+                        return colName;
+                    }
+                }
+                return fieldName;
+            }
+        }
+
+        return propertyName;
+    }
+
+    private JoinInfo findExistingJoin(List<JoinInfo> joins, String foreignKey) {
+        for (JoinInfo join : joins) {
+            if (join.foreignKey().equals(foreignKey)) {
+                return join;
+            }
+        }
+        return null;
+    }
+
+    private String getTableName(Class<?> entityClass) {
+        var table = entityClass.getAnnotation(ru.nsu.swiftmapper.annotations.entity.Table.class);
+        if (table != null && !table.name().isEmpty()) {
+            return table.name();
+        }
+        return entityClass.getSimpleName().toLowerCase();
+    }
+
+    private void buildCondition(StringBuilder sql, List<ParameterBinding> bindings,
+                                Object[] args, String columnName, TokenPattern operator,
+                                int paramIndex) {
+        if (operator.params() == 0) {
+            sql.append(columnName).append(operator.sql());
+        } else {
+            sql.append(columnName).append(operator.sql());
+
+            int paramsNeeded = operator.params();
+            if (paramsNeeded == -1) {
+                handleVarargOperator(sql, bindings, args, paramIndex, columnName);
+            } else {
+                for (int j = 0; j < paramsNeeded; j++) {
+                    if (paramIndex >= args.length) break;
+                    Object value = args[paramIndex++];
+                    if (operator.transformer() != null) {
+                        value = operator.transformer().apply(value);
+                    }
+                    bindings.add(new ParameterBinding(paramIndex - 1, value));
+                }
+            }
+        }
+    }
+
+    private NestedField parseNestedField(String token) {
+        for (var entry : mapper.getRelationshipFields().entrySet()) {
+            String fieldName = entry.getKey();
+            var relField = entry.getValue();
+
+            String capitalizedField = capitalize(fieldName);
+            if (token.startsWith(capitalizedField)) {
+                String remainder = token.substring(capitalizedField.length());
+                if (remainder.isEmpty()) continue;
+
+                Class<?> targetClass = getTargetClass(relField.field());
+
+                String propertyCondition = remainder;
+
+                String fkColumn = fieldName.toLowerCase() + "_id";
+                var joinColumn = relField.field().getAnnotation(JoinColumn.class);
+                if (joinColumn != null && !joinColumn.name().isEmpty()) {
+                    fkColumn = joinColumn.name();
+                }
+
+                String pkColumn = "id";
+                try {
+                    for (Field f : targetClass.getDeclaredFields()) {
+                        if (f.isAnnotationPresent(ru.nsu.swiftmapper.annotations.entity.Id.class)) {
+                            pkColumn = f.getName();
+                            if (f.isAnnotationPresent(Column.class)) {
+                                String colName = f.getAnnotation(Column.class).name();
+                                if (!colName.isEmpty()) pkColumn = colName;
+                            }
+                            break;
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("Could not determine PK column: {}", e.getMessage());
+                }
+
+                return new NestedField(targetClass, fkColumn, pkColumn,
+                        propertyCondition, extractPropertyName(propertyCondition));
+            }
+        }
+        return null;
+    }
+
+    private String extractPropertyName(String condition) {
+        for (TokenPattern pattern : CONDITION_PATTERNS) {
+            if (condition.endsWith(pattern.name())) {
+                return condition.substring(0, condition.length() - pattern.name().length());
+            }
+        }
+        return condition;
+    }
+
+    private String capitalize(String str) {
+        if (str == null || str.isEmpty()) return str;
+        return Character.toUpperCase(str.charAt(0)) + str.substring(1);
+    }
+
+    private Class<?> getTargetClass(Field field) {
+        Class<?> type = field.getType();
+        if (Collection.class.isAssignableFrom(type)) {
+            ParameterizedType pt = (ParameterizedType) field.getGenericType();
+            return (Class<?>) pt.getActualTypeArguments()[0];
+        }
+        return type;
+    }
+
     private void handleVarargOperator(StringBuilder sql, List<ParameterBinding> bindings,
                                       Object[] args, int paramIndex, String columnName) {
+        if (args == null || paramIndex >= args.length) return;
+
         Object arg = args[paramIndex];
         boolean isEmpty = false;
         List<?> items = null;
@@ -176,7 +324,7 @@ public class QueryMethodParser {
             items = list;
             size = list.size();
             isEmpty = list.isEmpty();
-        } else if (arg.getClass().isArray()) {
+        } else if (arg != null && arg.getClass().isArray()) {
             array = (Object[]) arg;
             size = array.length;
             isEmpty = array.length == 0;
@@ -186,23 +334,28 @@ public class QueryMethodParser {
             String currentSql = sql.toString();
             if (currentSql.endsWith(" IN (")) {
                 int replaceStart = currentSql.lastIndexOf(columnName);
-                sql.replace(replaceStart, sql.length(), "1=0");
+                if (replaceStart >= 0) {
+                    sql.replace(replaceStart, sql.length(), "1=0");
+                }
             } else if (currentSql.endsWith(" NOT IN (")) {
                 int replaceStart = currentSql.lastIndexOf(columnName);
-                sql.replace(replaceStart, sql.length(), "1=1");
+                if (replaceStart >= 0) {
+                    sql.replace(replaceStart, sql.length(), "1=1");
+                }
             }
         } else {
             String placeholders = String.join(", ",
                     java.util.Collections.nCopies(size, "?"));
             int insertPos = sql.lastIndexOf("(");
-            sql.insert(insertPos + 1, placeholders);
+            if (insertPos >= 0) {
+                sql.insert(insertPos + 1, placeholders);
+            }
 
             if (items != null) {
                 for (Object item : items) {
                     bindings.add(new ParameterBinding(paramIndex++, item));
                 }
-            } else {
-                assert array != null;
+            } else if (array != null) {
                 for (Object item : array) {
                     bindings.add(new ParameterBinding(paramIndex++, item));
                 }
@@ -271,14 +424,14 @@ public class QueryMethodParser {
 
         String property = matcher.group(1);
         String direction = matcher.group(2) != null ? matcher.group(2) : "Asc";
-        String column = mapper.getColumnName(property);
+        String column = getActualColumnName(mapper.getEntityClass(), property);
 
-        return new OrderClause(column + " " + direction.toUpperCase());
+        return new OrderClause("t0." + column + " " + direction.toUpperCase());
     }
 
     private String buildSelectClause(QueryType type) {
         return switch (type) {
-            case SELECT -> "SELECT *";
+            case SELECT -> "SELECT t0.*";
             case COUNT -> "SELECT COUNT(*)";
             case DELETE -> "DELETE";
             case EXISTS -> "SELECT 1";

@@ -2,10 +2,10 @@ package ru.nsu.swiftmapper.repository.query;
 
 import ru.nsu.swiftmapper.core.EntityMapper;
 import ru.nsu.swiftmapper.core.Session;
-import ru.nsu.swiftmapper.query.ParameterBinding;
-import ru.nsu.swiftmapper.query.ParsedQuery;
+import ru.nsu.swiftmapper.query.model.ParameterBinding;
+import ru.nsu.swiftmapper.query.model.ParsedQuery;
 import ru.nsu.swiftmapper.query.QueryMethodParser;
-import ru.nsu.swiftmapper.query.QueryType;
+import ru.nsu.swiftmapper.query.model.QueryType;
 import ru.nsu.swiftmapper.repository.Repository;
 
 import java.lang.reflect.InvocationHandler;

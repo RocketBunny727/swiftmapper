@@ -1,14 +1,13 @@
 package ru.nsu.swiftmapper.core;
 
 import lombok.Getter;
-import ru.nsu.swiftmapper.annotations.entity.Column;
-import ru.nsu.swiftmapper.annotations.entity.Entity;
-import ru.nsu.swiftmapper.annotations.entity.Id;
-import ru.nsu.swiftmapper.annotations.entity.Table;
+import ru.nsu.swiftmapper.annotations.entity.*;
 import ru.nsu.swiftmapper.annotations.relationship.*;
-import ru.nsu.swiftmapper.logger.SwiftLogger;
+import ru.nsu.swiftmapper.utils.converters.CamelToSnakeConverter;
+import ru.nsu.swiftmapper.utils.logger.SwiftLogger;
 import ru.nsu.swiftmapper.proxy.LazyList;
 import ru.nsu.swiftmapper.proxy.ProxyFactory;
+import ru.nsu.swiftmapper.utils.naming.NamingStrategy;
 
 import java.lang.reflect.*;
 import java.sql.*;
@@ -77,13 +76,10 @@ public class EntityMapper<T> {
             if (isRelationshipField(field)) continue;
 
             field.setAccessible(true);
-            String fieldName = field.getName().toLowerCase();
-            String colName = field.isAnnotationPresent(Column.class)
-                    ? field.getAnnotation(Column.class).name()
-                    : fieldName;
-            if (colName.isEmpty()) colName = fieldName;
+            String fieldName = field.getName();
+            String colName = NamingStrategy.getColumnName(field);
 
-            columnToField.put(colName.toLowerCase(), field);
+            columnToField.put(colName, field);
             fieldToColumn.put(fieldName, colName);
         }
         log.info("Cached {} field mappings", columnToField.size());
@@ -116,19 +112,15 @@ public class EntityMapper<T> {
     }
 
     public String getTableName() {
-        Table table = entityClass.getAnnotation(Table.class);
-        return table != null && !table.name().isEmpty() ? table.name()
-                : entityClass.getSimpleName().toLowerCase();
+        return NamingStrategy.getTableName(entityClass);
     }
 
     public String getIdColumn() {
-        return idField.isAnnotationPresent(Column.class)
-                ? idField.getAnnotation(Column.class).name()
-                : idField.getName();
+        return NamingStrategy.getIdColumnName(idField);
     }
 
     public String getColumnName(String fieldName) {
-        return fieldToColumn.getOrDefault(fieldName.toLowerCase(), fieldName);
+        return fieldToColumn.getOrDefault(fieldName, CamelToSnakeConverter.convert(fieldName));
     }
 
     public T map(ResultSet rs) throws SQLException {
@@ -153,7 +145,7 @@ public class EntityMapper<T> {
             ResultSetMetaData meta = rs.getMetaData();
 
             for (int i = 1; i <= meta.getColumnCount(); i++) {
-                String colLabel = meta.getColumnLabel(i).toLowerCase();
+                String colLabel = NamingStrategy.normalizeColumnLabel(meta.getColumnLabel(i));
                 Field field = columnToField.get(colLabel);
                 if (field != null) {
                     Object value = rs.getObject(i);
@@ -187,13 +179,12 @@ public class EntityMapper<T> {
     private void loadRelationship(T entity, RelationshipField relField, ResultSet rs,
                                   Map<Object, Object> visited) throws Exception {
         Field field = relField.field();
-        Class<?> targetClass = getTargetClass(field);
+        Class<?> targetClass = NamingStrategy.getTargetClass(field);
 
         switch (relField.type()) {
             case MANY_TO_ONE -> {
                 JoinColumn jc = field.getAnnotation(JoinColumn.class);
-                String fkColumn = jc != null && !jc.name().isEmpty() ? jc.name()
-                        : field.getName().toLowerCase() + "_id";
+                String fkColumn = NamingStrategy.getForeignKeyColumn(field);
 
                 Object fkValue = rs.getObject(fkColumn);
                 if (fkValue != null) {
@@ -211,9 +202,7 @@ public class EntityMapper<T> {
                             ownerId, visited);
                     field.set(entity, related);
                 } else {
-                    JoinColumn jc = field.getAnnotation(JoinColumn.class);
-                    String fkColumn = jc != null && !jc.name().isEmpty() ? jc.name()
-                            : field.getName().toLowerCase() + "_id";
+                    String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
                     Object fkValue = rs.getObject(fkColumn);
                     if (fkValue != null) {
                         Object related = fetchById(targetClass, fkValue, visited);
@@ -272,7 +261,7 @@ public class EntityMapper<T> {
                                          Object ownerId, Map<Object, Object> visited)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(targetClass, connection);
-        String fkColumn = mappedBy.toLowerCase() + "_id";
+        String fkColumn = NamingStrategy.getOneToManyFkColumn(entityClass, mappedBy);
         String sql = "SELECT * FROM " + targetMapper.getTableName() + " WHERE "
                 + fkColumn + " = ?";
 
@@ -290,8 +279,7 @@ public class EntityMapper<T> {
                                    Object ownerId, Map<Object, Object> visited)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(elementType, connection);
-        String fkColumn = mappedBy.isEmpty() ?
-                entityClass.getSimpleName().toLowerCase() + "_id" : mappedBy.toLowerCase() + "_id";
+        String fkColumn = NamingStrategy.getOneToManyFkColumn(entityClass, mappedBy);
         String sql = "SELECT * FROM " + targetMapper.getTableName() + " WHERE "
                 + fkColumn + " = ?";
 
@@ -310,12 +298,9 @@ public class EntityMapper<T> {
                                     Object ownerId, Map<Object, Object> visited)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(elementType, connection);
-        String joinTable = jt.name().isEmpty() ?
-                getTableName() + "_" + targetMapper.getTableName() : jt.name();
-        String joinCol = jt.joinColumn().isEmpty() ?
-                getTableName().toLowerCase() + "_id" : jt.joinColumn();
-        String inverseCol = jt.inverseJoinColumn().isEmpty() ?
-                targetMapper.getTableName().toLowerCase() + "_id" : jt.inverseJoinColumn();
+        String joinTable = NamingStrategy.getJoinTableName(entityClass, elementType, jt);
+        String joinCol = NamingStrategy.getJoinColumnName(jt, entityClass, true);
+        String inverseCol = NamingStrategy.getJoinColumnName(jt, elementType, false);
 
         String sql = "SELECT t.* FROM " + targetMapper.getTableName() + " t " +
                 "JOIN " + joinTable + " j ON t." + targetMapper.getIdColumn() + " = j." + inverseCol +
@@ -346,7 +331,7 @@ public class EntityMapper<T> {
 
     private void setLazyProxy(T entity, RelationshipField relField) {
         Field field = relField.field();
-        Class<?> targetClass = getTargetClass(field);
+        Class<?> targetClass = NamingStrategy.getTargetClass(field);
 
         try {
             Object ownerId = idField.get(entity);
@@ -356,9 +341,7 @@ public class EntityMapper<T> {
 
             switch (relField.type()) {
                 case MANY_TO_ONE, ONE_TO_ONE -> {
-                    JoinColumn jc = field.getAnnotation(JoinColumn.class);
-                    String fkColumn = jc != null && !jc.name().isEmpty() ? jc.name()
-                            : field.getName().toLowerCase() + "_id";
+                    String fkColumn = NamingStrategy.getForeignKeyColumn(field);
 
                     Runnable loader = () -> {
                         try {
@@ -429,15 +412,6 @@ public class EntityMapper<T> {
             }
         }
         return null;
-    }
-
-    private Class<?> getTargetClass(Field field) {
-        Class<?> type = field.getType();
-        if (Collection.class.isAssignableFrom(type)) {
-            ParameterizedType pt = (ParameterizedType) field.getGenericType();
-            return (Class<?>) pt.getActualTypeArguments()[0];
-        }
-        return type;
     }
 
     private Object convertValue(Object value, Class<?> targetType) {

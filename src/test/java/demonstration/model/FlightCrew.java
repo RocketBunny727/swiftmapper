@@ -1,10 +1,14 @@
 package demonstration.model;
 
+import lombok.Getter;
+import lombok.Setter;
 import ru.nsu.swiftmapper.annotations.entity.*;
 import ru.nsu.swiftmapper.annotations.relationship.*;
 
 @Entity
 @Table(name = "flight_crews")
+@Getter
+@Setter
 public class FlightCrew {
     @Id
     @GeneratedValue(strategy = Strategy.PATTERN, pattern = "CREW_", startValue = 50000001)

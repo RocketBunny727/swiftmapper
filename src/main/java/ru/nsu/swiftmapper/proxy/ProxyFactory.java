@@ -4,7 +4,7 @@ import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.implementation.MethodDelegation;
 import net.bytebuddy.implementation.bind.annotation.*;
 import net.bytebuddy.matcher.ElementMatchers;
-import ru.nsu.swiftmapper.logger.SwiftLogger;
+import ru.nsu.swiftmapper.utils.logger.SwiftLogger;
 
 import java.lang.reflect.Method;
 import java.util.concurrent.Callable;

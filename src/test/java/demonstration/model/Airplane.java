@@ -19,13 +19,13 @@ public class Airplane {
     private String model;
 
     @Column(nullable = false)
-    private int pass_capacity;
+    private int PassCapacity;
 
     @Column(nullable = false)
     private String number;
 
     @Override
     public String toString() {
-        return "Airplane [ID:" + id + " | " + manufacturer + " " + model + " | " + pass_capacity + ". NUMBER: " + number + "]";
+        return "Airplane [ID:" + id + " | " + manufacturer + " " + model + " | " + PassCapacity + ". NUMBER: " + number + "]";
     }
 }

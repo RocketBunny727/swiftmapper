@@ -1,4 +1,4 @@
-package ru.nsu.swiftmapper.logger;
+package ru.nsu.swiftmapper.utils.logger;
 
 public class SwiftLoggerFactory {
     public static SwiftLogger getLogger(Class<?> clazz) {

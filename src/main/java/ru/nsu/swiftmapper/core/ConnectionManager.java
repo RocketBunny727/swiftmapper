@@ -3,7 +3,8 @@ package ru.nsu.swiftmapper.core;
 import ru.nsu.swiftmapper.annotations.entity.*;
 import ru.nsu.swiftmapper.annotations.relationship.*;
 import ru.nsu.swiftmapper.config.ConfigReader;
-import ru.nsu.swiftmapper.logger.SwiftLogger;
+import ru.nsu.swiftmapper.utils.naming.NamingStrategy;
+import ru.nsu.swiftmapper.utils.logger.SwiftLogger;
 import ru.nsu.swiftmapper.repository.SwiftRepository;
 
 import java.lang.reflect.Field;
@@ -77,13 +78,14 @@ public class ConnectionManager {
             throw new IllegalArgumentException(entityClass + " must be @Entity");
         }
 
-        EntityMapper<?> mapper = new EntityMapper<>(entityClass, connection);
-        String tableName = mapper.getTableName();
+        String tableName = NamingStrategy.getTableName(entityClass);
 
         List<String> columns = new ArrayList<>();
         List<String> foreignKeys = new ArrayList<>();
         GeneratedValue idGen = null;
         Field idField = null;
+        boolean needSequence = false;
+        long sequenceStartValue = 1;
 
         for (Field field : entityClass.getDeclaredFields()) {
             field.setAccessible(true);
@@ -100,56 +102,54 @@ public class ConnectionManager {
             if (field.isAnnotationPresent(Transient.class)) continue;
 
             if (field.isAnnotationPresent(Id.class)) {
-                String colDef = createIdColumnDefinition(mapper.getIdColumn(), idField, idGen);
+                String colDef = createIdColumnDefinition(NamingStrategy.getIdColumnName(idField), idField, idGen);
                 columns.add(colDef);
 
-                if (idGen != null && (idGen.strategy() == Strategy.PATTERN ||
+                if (idGen != null && (idGen.strategy() == Strategy.SEQUENCE ||
+                        idGen.strategy() == Strategy.PATTERN ||
                         idGen.strategy() == Strategy.ALPHA)) {
-                    createCustomSequence(tableName, mapper.getIdColumn(), idGen.startValue());
+                    needSequence = true;
+                    sequenceStartValue = idGen.startValue();
                 }
             } else if (field.isAnnotationPresent(ManyToOne.class)) {
                 JoinColumn jc = field.getAnnotation(JoinColumn.class);
-                String fkColumn = jc != null && !jc.name().isEmpty() ?
-                        jc.name() : field.getName().toLowerCase() + "_id";
+                String fkColumn = NamingStrategy.getForeignKeyColumn(field);
 
                 Class<?> targetClass = field.getType();
                 String targetIdType = getTargetIdSqlType(targetClass);
 
                 columns.add(fkColumn + " " + targetIdType);
 
-                EntityMapper<?> targetMapper = new EntityMapper<>(targetClass, connection);
-                String targetTable = targetMapper.getTableName();
+                String targetTable = NamingStrategy.getTableName(targetClass);
                 String referencedCol = jc != null && !jc.referencedColumnName().isEmpty() ?
-                        jc.referencedColumnName() : targetMapper.getIdColumn();
+                        jc.referencedColumnName() : NamingStrategy.getIdColumnName(getIdField(targetClass));
 
                 foreignKeys.add(String.format(
-                        "ALTER TABLE %s ADD CONSTRAINT fk_%s_%s FOREIGN KEY (%s) REFERENCES %s(%s)",
-                        tableName, tableName, fkColumn, fkColumn, targetTable, referencedCol
+                        "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
+                        tableName, NamingStrategy.getFkConstraintName(tableName, fkColumn), fkColumn, targetTable, referencedCol
                 ));
             } else if (field.isAnnotationPresent(OneToOne.class)) {
                 OneToOne oo = field.getAnnotation(OneToOne.class);
                 if (oo.mappedBy().isEmpty()) {
                     JoinColumn jc = field.getAnnotation(JoinColumn.class);
-                    String fkColumn = jc != null && !jc.name().isEmpty() ?
-                            jc.name() : field.getName().toLowerCase() + "_id";
+                    String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
 
                     Class<?> targetClass = field.getType();
                     String targetIdType = getTargetIdSqlType(targetClass);
 
                     columns.add(fkColumn + " " + targetIdType);
 
-                    EntityMapper<?> targetMapper = new EntityMapper<>(targetClass, connection);
-                    String targetTable = targetMapper.getTableName();
+                    String targetTable = NamingStrategy.getTableName(targetClass);
                     String referencedCol = jc != null && !jc.referencedColumnName().isEmpty() ?
-                            jc.referencedColumnName() : targetMapper.getIdColumn();
+                            jc.referencedColumnName() : NamingStrategy.getIdColumnName(getIdField(targetClass));
 
                     foreignKeys.add(String.format(
-                            "ALTER TABLE %s ADD CONSTRAINT fk_%s_%s FOREIGN KEY (%s) REFERENCES %s(%s)",
-                            tableName, tableName, fkColumn, fkColumn, targetTable, referencedCol
+                            "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
+                            tableName, NamingStrategy.getFkConstraintName(tableName, fkColumn), fkColumn, targetTable, referencedCol
                     ));
                 }
             } else if (!isRelationshipField(field)) {
-                String colName = getColumnName(field);
+                String colName = NamingStrategy.getColumnName(field);
                 String sqlType = getSqlType(field, false, null);
                 columns.add(colName + " " + sqlType);
             }
@@ -164,6 +164,10 @@ public class ConnectionManager {
             log.info("Created table: {}", tableName);
         }
 
+        if (needSequence) {
+            createSequence(tableName, NamingStrategy.getIdColumnName(idField), sequenceStartValue);
+        }
+
         for (String fkSql : foreignKeys) {
             try (Statement stmt = connection.createStatement()) {
                 stmt.execute(fkSql);
@@ -174,21 +178,18 @@ public class ConnectionManager {
         }
     }
 
-    private String getTargetIdSqlType(Class<?> targetClass) {
-        Field idField = null;
-        GeneratedValue gen = null;
-
-        for (Field field : targetClass.getDeclaredFields()) {
+    private Field getIdField(Class<?> clazz) {
+        for (Field field : clazz.getDeclaredFields()) {
             if (field.isAnnotationPresent(Id.class)) {
-                idField = field;
-                gen = field.getAnnotation(GeneratedValue.class);
-                break;
+                return field;
             }
         }
+        throw new IllegalStateException("No @Id field in " + clazz.getName());
+    }
 
-        if (idField == null) {
-            return "BIGINT";
-        }
+    private String getTargetIdSqlType(Class<?> targetClass) {
+        Field idField = getIdField(targetClass);
+        GeneratedValue gen = idField.getAnnotation(GeneratedValue.class);
 
         if (gen != null && gen.strategy() == Strategy.PATTERN) {
             return "VARCHAR(100)";
@@ -213,14 +214,6 @@ public class ConnectionManager {
                 field.isAnnotationPresent(ManyToMany.class);
     }
 
-    private String getColumnName(Field field) {
-        if (field.isAnnotationPresent(Column.class)) {
-            String name = field.getAnnotation(Column.class).name();
-            if (!name.isEmpty()) return name;
-        }
-        return field.getName().toLowerCase();
-    }
-
     private String createIdColumnDefinition(String idColumn, Field idField, GeneratedValue gen) {
         String sqlType = getSqlType(idField, true, gen);
 
@@ -234,8 +227,8 @@ public class ConnectionManager {
         return idColumn + " " + sqlType + " PRIMARY KEY";
     }
 
-    private void createCustomSequence(String tableName, String idColumn, long startValue) throws SQLException {
-        String seqName = tableName + "_" + idColumn + "_custom_seq";
+    private void createSequence(String tableName, String idColumn, long startValue) throws SQLException {
+        String seqName = NamingStrategy.getSequenceName(tableName, idColumn);
 
         String dropSql = String.format("DROP SEQUENCE IF EXISTS %s CASCADE", seqName);
         try (Statement stmt = connection.createStatement()) {
@@ -243,16 +236,16 @@ public class ConnectionManager {
         }
 
         String createSql = String.format(
-                "CREATE SEQUENCE %s START WITH %d INCREMENT BY 1 NO MINVALUE NO MAXVALUE",
-                seqName, startValue
+                "CREATE SEQUENCE %s START WITH %d INCREMENT BY 1 NO MINVALUE NO MAXVALUE OWNED BY %s.%s",
+                seqName, startValue, tableName, idColumn
         );
 
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createSql);
-            log.info("Created custom sequence {} starting from {}", seqName, startValue);
+            log.info("Created sequence {} starting from {} (owned by {}.{})",
+                    seqName, startValue, tableName, idColumn);
         }
     }
-
 
     private String getSqlType(Field field, boolean isId, GeneratedValue gen) {
         if (field.isAnnotationPresent(Column.class)) {
@@ -303,17 +296,18 @@ public class ConnectionManager {
                 JoinColumn jc = field.getAnnotation(JoinColumn.class);
                 if (jc == null) continue;
 
-                String fkName = jc.name().isEmpty() ?
-                        field.getName().toLowerCase() + "_id" : jc.name();
-                String targetTable = field.getType().getAnnotation(Table.class).name();
-                if (targetTable.isEmpty()) targetTable = field.getType().getSimpleName().toLowerCase();
-
-                EntityMapper<?> targetMapper = new EntityMapper<>(field.getType(), connection);
+                String fkName = NamingStrategy.getForeignKeyColumn(field);
+                String targetTable = NamingStrategy.getTableName(field.getType());
                 String referencedCol = jc.referencedColumnName();
 
+                if (referencedCol.isEmpty()) {
+                    referencedCol = NamingStrategy.getIdColumnName(getIdField(field.getType()));
+                }
+
                 String sql = String.format(
-                        "ALTER TABLE %s ADD CONSTRAINT fk_%s_%s FOREIGN KEY (%s) REFERENCES %s(%s)",
-                        getTableName(entityClass), getTableName(entityClass), fkName,
+                        "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
+                        NamingStrategy.getTableName(entityClass),
+                        NamingStrategy.getFkConstraintName(NamingStrategy.getTableName(entityClass), fkName),
                         fkName, targetTable, referencedCol
                 );
 
@@ -325,11 +319,5 @@ public class ConnectionManager {
                 }
             }
         }
-    }
-
-    private String getTableName(Class<?> clazz) {
-        Table table = clazz.getAnnotation(Table.class);
-        return table != null && !table.name().isEmpty() ? table.name()
-                : clazz.getSimpleName().toLowerCase();
     }
 }

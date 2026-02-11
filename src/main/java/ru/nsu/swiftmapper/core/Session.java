@@ -2,7 +2,8 @@ package ru.nsu.swiftmapper.core;
 
 import ru.nsu.swiftmapper.annotations.entity.*;
 import ru.nsu.swiftmapper.annotations.relationship.*;
-import ru.nsu.swiftmapper.logger.SwiftLogger;
+import ru.nsu.swiftmapper.utils.naming.NamingStrategy;
+import ru.nsu.swiftmapper.utils.logger.SwiftLogger;
 
 import java.lang.reflect.Field;
 import java.sql.*;
@@ -57,9 +58,7 @@ public class Session<T> {
                     if (relatedEntity != null) {
                         Object relatedId = getEntityId(relatedEntity);
                         if (relatedId != null) {
-                            JoinColumn jc = field.getAnnotation(JoinColumn.class);
-                            String fkColumn = jc != null && !jc.name().isEmpty() ?
-                                    jc.name() : field.getName().toLowerCase() + "_id";
+                            String fkColumn = NamingStrategy.getForeignKeyColumn(field);
 
                             columns.append(fkColumn).append(",");
                             placeholders.append("?,");
@@ -74,9 +73,7 @@ public class Session<T> {
                         if (relatedEntity != null) {
                             Object relatedId = getEntityId(relatedEntity);
                             if (relatedId != null) {
-                                JoinColumn jc = field.getAnnotation(JoinColumn.class);
-                                String fkColumn = jc != null && !jc.name().isEmpty() ?
-                                        jc.name() : field.getName().toLowerCase() + "_id";
+                                String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
 
                                 columns.append(fkColumn).append(",");
                                 placeholders.append("?,");
@@ -89,7 +86,7 @@ public class Session<T> {
             }
             if (field.isAnnotationPresent(Id.class) && generatedOnDb) continue;
 
-            String colName = mapper.getColumnName(field.getName());
+            String colName = NamingStrategy.getColumnName(field);
             Object value = field.get(entity);
 
             columns.append(colName).append(",");
@@ -229,7 +226,7 @@ public class Session<T> {
                 if (field.isAnnotationPresent(Id.class)) {
                     idValue = field.get(entity);
                 } else {
-                    setClause.append(mapper.getColumnName(field.getName())).append(" = ?, ");
+                    setClause.append(NamingStrategy.getColumnName(field)).append(" = ?, ");
                     params.add(field.get(entity));
                 }
             } catch (IllegalAccessException e) {
@@ -315,7 +312,7 @@ public class Session<T> {
     }
 
     private long nextSequenceValue(String tableName, String idColumn) throws SQLException {
-        String seqName = tableName + "_" + idColumn + "_seq";
+        String seqName = NamingStrategy.getSequenceName(tableName, idColumn);
         String sql = "SELECT nextval(?)";
 
         log.debug("Fetching next sequence value from {}", seqName);
@@ -339,7 +336,7 @@ public class Session<T> {
     }
 
     private long generateAlphaId(long startsWith, String tableName) throws SQLException {
-        String seqName = tableName + "_" + mapper.getIdColumn() + "_custom_seq";
+        String seqName = NamingStrategy.getSequenceName(tableName, mapper.getIdColumn()) + "_custom";
 
         return nextSequenceValue(tableName, mapper.getIdColumn(), startsWith);
     }
@@ -359,7 +356,7 @@ public class Session<T> {
         GeneratedValue gen = getGeneratedValue(idField);
 
         if (gen != null) {
-            String seqName = (mapper.getTableName() + "_" + mapper.getIdColumn() + "_seq").toLowerCase();
+            String seqName = NamingStrategy.getSequenceName(mapper.getTableName(), mapper.getIdColumn());
             long startValue = gen.startValue();
 
             log.info("Resetting sequence {} to {}", seqName, startValue);
@@ -373,16 +370,26 @@ public class Session<T> {
     }
 
     private long nextSequenceValue(String tableName, String idColumn, long startValue) throws SQLException {
-        String seqName = (tableName + "_" + idColumn + "_seq").toLowerCase();
+        String seqName = NamingStrategy.getSequenceName(tableName, idColumn);
 
-        String createSql = String.format(
-                "CREATE SEQUENCE IF NOT EXISTS %s START WITH %d; " +
-                        "ALTER SEQUENCE %s OWNED BY %s.%s",
-                seqName, startValue, seqName, tableName, idColumn
-        );
+        String checkSql = "SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = ?";
+        boolean exists = false;
+        try (PreparedStatement stmt = connection.prepareStatement(checkSql)) {
+            stmt.setString(1, seqName);
+            try (ResultSet rs = stmt.executeQuery()) {
+                exists = rs.next();
+            }
+        }
 
-        try (Statement stmt = connection.createStatement()) {
-            stmt.execute(createSql);
+        if (!exists) {
+            String createSql = String.format(
+                    "CREATE SEQUENCE %s START WITH %d OWNED BY %s.%s",
+                    seqName, startValue, tableName, idColumn
+            );
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute(createSql);
+                log.info("Created sequence {} on demand", seqName);
+            }
         }
 
         String sql = String.format("SELECT nextval('%s')", seqName);
