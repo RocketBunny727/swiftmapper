@@ -1,9 +1,12 @@
 package demonstration.model;
 
+import com.rocketbunny.swiftmapper.annotations.entity.*;
+import com.rocketbunny.swiftmapper.annotations.relationship.FetchType;
+import com.rocketbunny.swiftmapper.annotations.relationship.JoinColumn;
+import com.rocketbunny.swiftmapper.annotations.relationship.ManyToOne;
+import com.rocketbunny.swiftmapper.annotations.relationship.OneToOne;
 import lombok.Getter;
 import lombok.Setter;
-import ru.nsu.swiftmapper.annotations.entity.*;
-import ru.nsu.swiftmapper.annotations.relationship.*;
 
 @Entity
 @Table(name = "tickets")

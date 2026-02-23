@@ -1,0 +1,14 @@
+package com.rocketbunny.swiftmapper.annotations.relationship;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+public @interface JoinTable {
+    String name() default "";
+    String joinColumn() default "";
+    String inverseJoinColumn() default "";
+}

@@ -1,8 +1,8 @@
 package demonstration.model;
 
+import com.rocketbunny.swiftmapper.annotations.entity.*;
 import lombok.Getter;
 import lombok.Setter;
-import ru.nsu.swiftmapper.annotations.entity.*;
 
 import java.time.LocalDate;
 

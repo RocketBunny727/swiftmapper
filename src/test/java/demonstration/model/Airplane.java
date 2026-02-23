@@ -1,8 +1,8 @@
 package demonstration.model;
 
+import com.rocketbunny.swiftmapper.annotations.entity.*;
 import lombok.Getter;
 import lombok.Setter;
-import ru.nsu.swiftmapper.annotations.entity.*;
 
 @Entity
 @Table(name = "airplanes")
@@ -16,6 +16,7 @@ public class Airplane {
     @Column(nullable = false)
     private String manufacturer;
 
+    @Column(nullable = false)
     private String model;
 
     @Column(nullable = false)

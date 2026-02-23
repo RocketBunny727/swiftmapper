@@ -1,7 +1,7 @@
 package demonstration.repostiory;
 
 import demonstration.model.Airport;
-import ru.nsu.swiftmapper.repository.Repository;
+import com.rocketbunny.swiftmapper.repository.Repository;
 
 import java.util.Optional;
 
