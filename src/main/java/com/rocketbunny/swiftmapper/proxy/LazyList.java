@@ -1,6 +1,9 @@
 package com.rocketbunny.swiftmapper.proxy;
 
+import com.rocketbunny.swiftmapper.exception.LazyLoadingException;
+
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
@@ -10,26 +13,40 @@ public class LazyList<E> implements List<E> {
     private volatile List<E> delegate;
     private final Runnable loader;
     private volatile boolean loaded = false;
-    private final Object lock = new Object();
+    private final Object initializationLock = new Object();
 
     public LazyList(Runnable loader) {
-        this.loader = loader;
-        this.delegate = new ArrayList<>();
+        this.loader = Objects.requireNonNull(loader, "Loader cannot be null");
+        this.delegate = new CopyOnWriteArrayList<>();
     }
 
     private void ensureLoaded() {
-        if (!loaded) {
-            synchronized (lock) {
-                if (!loaded) {
-                    loader.run();
-                    loaded = true;
-                }
+        if (loaded) {
+            return;
+        }
+
+        synchronized (initializationLock) {
+            if (loaded) {
+                return;
             }
+
+            List<E> loadedData = new ArrayList<>();
+            try {
+                loader.run();
+            } catch (Exception e) {
+                throw new LazyLoadingException("Failed to load lazy list data", e);
+            }
+
+            loaded = true;
         }
     }
 
     public boolean isLoaded() {
         return loaded;
+    }
+
+    void internalSetDelegate(List<E> delegate) {
+        this.delegate = delegate != null ? new CopyOnWriteArrayList<>(delegate) : new CopyOnWriteArrayList<>();
     }
 
     @Override
@@ -70,7 +87,9 @@ public class LazyList<E> implements List<E> {
 
     @Override
     public boolean add(E e) {
-        ensureLoaded();
+        if (!loaded) {
+            ensureLoaded();
+        }
         return delegate.add(e);
     }
 
@@ -88,13 +107,17 @@ public class LazyList<E> implements List<E> {
 
     @Override
     public boolean addAll(Collection<? extends E> c) {
-        ensureLoaded();
+        if (!loaded) {
+            ensureLoaded();
+        }
         return delegate.addAll(c);
     }
 
     @Override
     public boolean addAll(int index, Collection<? extends E> c) {
-        ensureLoaded();
+        if (!loaded) {
+            ensureLoaded();
+        }
         return delegate.addAll(index, c);
     }
 
@@ -119,17 +142,24 @@ public class LazyList<E> implements List<E> {
     @Override
     public void sort(Comparator<? super E> c) {
         ensureLoaded();
-        delegate.sort(c);
+        List<E> sorted = new ArrayList<>(delegate);
+        sorted.sort(c);
+        delegate = new CopyOnWriteArrayList<>(sorted);
     }
 
     @Override
     public void clear() {
-        ensureLoaded();
-        delegate.clear();
+        if (loaded) {
+            delegate.clear();
+        } else {
+            loaded = true;
+            delegate = new CopyOnWriteArrayList<>();
+        }
     }
 
     @Override
     public boolean equals(Object o) {
+        if (o == this) return true;
         ensureLoaded();
         return delegate.equals(o);
     }
@@ -154,7 +184,9 @@ public class LazyList<E> implements List<E> {
 
     @Override
     public void add(int index, E element) {
-        ensureLoaded();
+        if (!loaded) {
+            ensureLoaded();
+        }
         delegate.add(index, element);
     }
 
@@ -225,8 +257,8 @@ public class LazyList<E> implements List<E> {
     }
 
     public void setDelegate(List<E> delegate) {
-        synchronized (lock) {
-            this.delegate = delegate != null ? delegate : new ArrayList<>();
+        synchronized (initializationLock) {
+            this.delegate = delegate != null ? new CopyOnWriteArrayList<>(delegate) : new CopyOnWriteArrayList<>();
             this.loaded = true;
         }
     }

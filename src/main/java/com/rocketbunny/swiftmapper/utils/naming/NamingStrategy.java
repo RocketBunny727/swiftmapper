@@ -34,7 +34,6 @@ public final class NamingStrategy {
     }
 
     private NamingStrategy() {
-        // Utility class, only for static use
     }
 
     public static String getTableName(Class<?> entityClass) {
@@ -108,9 +107,12 @@ public final class NamingStrategy {
 
     public static String getJoinColumnName(JoinTable joinTable, Class<?> ownerClass, boolean isOwnerSide) {
         if (joinTable != null) {
-            String name = isOwnerSide ? joinTable.joinColumn() : joinTable.inverseJoinColumn();
-            if (!name.isEmpty()) {
-                return name.toLowerCase();
+            JoinColumn[] columns = isOwnerSide ? joinTable.joinColumns() : joinTable.inverseJoinColumns();
+            if (columns != null && columns.length > 0) {
+                String name = columns[0].name();
+                if (!name.isEmpty()) {
+                    return name.toLowerCase();
+                }
             }
         }
 

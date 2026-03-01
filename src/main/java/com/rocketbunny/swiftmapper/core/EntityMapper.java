@@ -19,9 +19,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class EntityMapper<T> {
     private final Class<T> entityClass;
-    private final Map<String, Field> columnToField = new HashMap<>();
-    private final Map<String, String> fieldToColumn = new HashMap<>();
-    private final Map<String, RelationshipField> relationshipFields = new HashMap<>();
+    private final Map<String, Field> columnToField;
+    private final Map<String, String> fieldToColumn;
+    private final Map<String, RelationshipField> relationshipFields;
     private final Constructor<T> constructor;
     private final Field idField;
     private final ConnectionManager connectionManager;
@@ -29,6 +29,7 @@ public class EntityMapper<T> {
     private static final SwiftLogger log = SwiftLogger.getLogger(EntityMapper.class);
     private static final Map<Class<?>, EntityMapper<?>> cache = new ConcurrentHashMap<>();
     private static final int MAX_DEPTH = 10;
+    private static final int MAX_CACHE_SIZE = 1000;
 
     public EntityMapper(Class<T> entityClass, ConnectionManager connectionManager) {
         this.entityClass = entityClass;
@@ -39,6 +40,10 @@ public class EntityMapper<T> {
 
         this.constructor = findDefaultConstructor();
         this.idField = findIdField();
+        this.columnToField = new HashMap<>();
+        this.fieldToColumn = new HashMap<>();
+        this.relationshipFields = new HashMap<>();
+
         cacheFieldMappings();
         cacheRelationshipFields();
 
@@ -47,6 +52,10 @@ public class EntityMapper<T> {
 
     @SuppressWarnings("unchecked")
     public static <T> EntityMapper<T> getInstance(Class<T> entityClass, ConnectionManager connectionManager) {
+        if (cache.size() >= MAX_CACHE_SIZE) {
+            cache.clear();
+            log.warn("EntityMapper cache cleared due to size limit");
+        }
         return (EntityMapper<T>) cache.computeIfAbsent(entityClass,
                 k -> new EntityMapper<>(entityClass, connectionManager));
     }
@@ -56,7 +65,7 @@ public class EntityMapper<T> {
     }
 
     public Map<String, RelationshipField> getRelationshipFields() {
-        return relationshipFields;
+        return Collections.unmodifiableMap(relationshipFields);
     }
 
     @SuppressWarnings("unchecked")
@@ -81,7 +90,8 @@ public class EntityMapper<T> {
     }
 
     private void cacheFieldMappings() {
-        for (Field field : entityClass.getDeclaredFields()) {
+        List<Field> fields = getAllFields(entityClass);
+        for (Field field : fields) {
             if (isRelationshipField(field)) continue;
 
             field.setAccessible(true);
@@ -95,7 +105,8 @@ public class EntityMapper<T> {
     }
 
     private void cacheRelationshipFields() {
-        for (Field field : entityClass.getDeclaredFields()) {
+        List<Field> fields = getAllFields(entityClass);
+        for (Field field : fields) {
             field.setAccessible(true);
             RelationshipType type = getRelationshipType(field);
             if (type != null) {
@@ -103,6 +114,15 @@ public class EntityMapper<T> {
             }
         }
         log.info("Cached {} relationship fields", relationshipFields.size());
+    }
+
+    private List<Field> getAllFields(Class<?> clazz) {
+        List<Field> fields = new ArrayList<>();
+        while (clazz != null && clazz != Object.class) {
+            fields.addAll(Arrays.asList(clazz.getDeclaredFields()));
+            clazz = clazz.getSuperclass();
+        }
+        return fields;
     }
 
     private boolean isRelationshipField(Field field) {
@@ -200,10 +220,8 @@ public class EntityMapper<T> {
                 String fkColumn = NamingStrategy.getForeignKeyColumn(field);
                 Object fkValue = rs.getObject(fkColumn);
                 if (fkValue != null) {
-                    try (Connection conn = connectionManager.getConnection()) {
-                        Object related = fetchById(targetClass, fkValue, visited, depth, conn);
-                        field.set(entity, related);
-                    }
+                    Object related = fetchById(targetClass, fkValue, visited, depth);
+                    field.set(entity, related);
                 }
             }
 
@@ -212,19 +230,15 @@ public class EntityMapper<T> {
                 Object ownerId = idField.get(entity);
 
                 if (!anno.mappedBy().isEmpty()) {
-                    try (Connection conn = connectionManager.getConnection()) {
-                        Object related = fetchOneToOneMappedBy(targetClass, anno.mappedBy(),
-                                ownerId, visited, depth, conn);
-                        field.set(entity, related);
-                    }
+                    Object related = fetchOneToOneMappedBy(targetClass, anno.mappedBy(),
+                            ownerId, visited, depth);
+                    field.set(entity, related);
                 } else {
                     String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
                     Object fkValue = rs.getObject(fkColumn);
                     if (fkValue != null) {
-                        try (Connection conn = connectionManager.getConnection()) {
-                            Object related = fetchById(targetClass, fkValue, visited, depth, conn);
-                            field.set(entity, related);
-                        }
+                        Object related = fetchById(targetClass, fkValue, visited, depth);
+                        field.set(entity, related);
                     }
                 }
             }
@@ -234,11 +248,9 @@ public class EntityMapper<T> {
                 Class<?> elementType = (Class<?>) ((ParameterizedType) field.getGenericType())
                         .getActualTypeArguments()[0];
                 Object ownerId = idField.get(entity);
-                try (Connection conn = connectionManager.getConnection()) {
-                    List<?> related = fetchOneToMany(elementType, anno.mappedBy(),
-                            ownerId, visited, depth, conn);
-                    field.set(entity, related);
-                }
+                List<?> related = fetchOneToMany(elementType, anno.mappedBy(),
+                        ownerId, visited, depth);
+                field.set(entity, related);
             }
 
             case MANY_TO_MANY -> {
@@ -248,18 +260,14 @@ public class EntityMapper<T> {
                 Object ownerId = idField.get(entity);
 
                 if (!anno.mappedBy().isEmpty()) {
-                    try (Connection conn = connectionManager.getConnection()) {
-                        List<?> related = fetchManyToManyInverse(elementType, anno.mappedBy(),
-                                ownerId, visited, depth, conn);
-                        field.set(entity, related);
-                    }
+                    List<?> related = fetchManyToManyInverse(elementType, anno.mappedBy(),
+                            ownerId, visited, depth);
+                    field.set(entity, related);
                 } else {
                     JoinTable jt = field.getAnnotation(JoinTable.class);
-                    try (Connection conn = connectionManager.getConnection()) {
-                        List<?> related = fetchManyToMany(elementType, jt,
-                                ownerId, visited, depth, conn);
-                        field.set(entity, related);
-                    }
+                    List<?> related = fetchManyToMany(elementType, jt,
+                            ownerId, visited, depth);
+                    field.set(entity, related);
                 }
             }
         }
@@ -276,12 +284,13 @@ public class EntityMapper<T> {
 
                     final Object capturedOwnerId = ownerId;
                     final String capturedFkColumn = fkColumn;
+                    final String capturedTableName = getTableName();
 
                     Callable<Object> loader = () -> {
                         try (Connection conn = connectionManager.getConnection()) {
-                            Object fkValue = fetchFkValue(capturedOwnerId, capturedFkColumn, conn);
+                            Object fkValue = fetchFkValue(capturedOwnerId, capturedFkColumn, capturedTableName, conn);
                             if (fkValue != null) {
-                                return fetchById(targetClass, fkValue, new HashMap<>(), 0, conn);
+                                return fetchByIdWithConnection(targetClass, fkValue, new HashMap<>(), 0, conn);
                             }
                         }
                         return null;
@@ -300,7 +309,7 @@ public class EntityMapper<T> {
 
                         Callable<Object> loader = () -> {
                             try (Connection conn = connectionManager.getConnection()) {
-                                return fetchOneToOneMappedBy(targetClass, capturedMappedBy,
+                                return fetchOneToOneMappedByWithConnection(targetClass, capturedMappedBy,
                                         capturedOwnerId, new HashMap<>(), 0, conn);
                             }
                         };
@@ -312,12 +321,13 @@ public class EntityMapper<T> {
 
                         final Object capturedOwnerId = ownerId;
                         final String capturedFkColumn = fkColumn;
+                        final String capturedTableName = getTableName();
 
                         Callable<Object> loader = () -> {
                             try (Connection conn = connectionManager.getConnection()) {
-                                Object fkValue = fetchFkValue(capturedOwnerId, capturedFkColumn, conn);
+                                Object fkValue = fetchFkValue(capturedOwnerId, capturedFkColumn, capturedTableName, conn);
                                 if (fkValue != null) {
-                                    return fetchById(targetClass, fkValue, new HashMap<>(), 0, conn);
+                                    return fetchByIdWithConnection(targetClass, fkValue, new HashMap<>(), 0, conn);
                                 }
                             }
                             return null;
@@ -338,16 +348,16 @@ public class EntityMapper<T> {
                         try (Connection conn = connectionManager.getConnection()) {
                             List<?> loaded;
                             if (relField.type() == RelationshipType.ONE_TO_MANY) {
-                                loaded = fetchOneToMany(targetClass,
+                                loaded = fetchOneToManyWithConnection(targetClass,
                                         oneToMany != null ? oneToMany.mappedBy() : "",
                                         capturedOwnerId, new HashMap<>(), 0, conn);
                             } else {
                                 if (manyToMany != null && !manyToMany.mappedBy().isEmpty()) {
-                                    loaded = fetchManyToManyInverse(targetClass, manyToMany.mappedBy(),
+                                    loaded = fetchManyToManyInverseWithConnection(targetClass, manyToMany.mappedBy(),
                                             capturedOwnerId, new HashMap<>(), 0, conn);
                                 } else {
                                     JoinTable jt = field.getAnnotation(JoinTable.class);
-                                    loaded = fetchManyToMany(targetClass, jt, capturedOwnerId, new HashMap<>(), 0, conn);
+                                    loaded = fetchManyToManyWithConnection(targetClass, jt, capturedOwnerId, new HashMap<>(), 0, conn);
                                 }
                             }
                             @SuppressWarnings("unchecked")
@@ -371,13 +381,20 @@ public class EntityMapper<T> {
         }
     }
 
-    private Object fetchById(Class<?> targetClass, Object id, Map<String, Object> visited, int depth, Connection conn)
+    private Object fetchById(Class<?> targetClass, Object id, Map<String, Object> visited, int depth) throws SQLException {
+        try (Connection conn = connectionManager.getConnection()) {
+            return fetchByIdWithConnection(targetClass, id, visited, depth, conn);
+        }
+    }
+
+    private Object fetchByIdWithConnection(Class<?> targetClass, Object id, Map<String, Object> visited, int depth, Connection conn)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(targetClass, connectionManager);
         String sql = "SELECT * FROM " + targetMapper.getTableName() + " WHERE "
                 + targetMapper.getIdColumn() + " = ?";
 
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setQueryTimeout(30);
             stmt.setObject(1, id);
             ResultSet rs = stmt.executeQuery();
             if (rs.next()) {
@@ -388,7 +405,14 @@ public class EntityMapper<T> {
     }
 
     private Object fetchOneToOneMappedBy(Class<?> targetClass, String mappedBy,
-                                         Object ownerId, Map<String, Object> visited, int depth, Connection conn)
+                                         Object ownerId, Map<String, Object> visited, int depth) throws SQLException {
+        try (Connection conn = connectionManager.getConnection()) {
+            return fetchOneToOneMappedByWithConnection(targetClass, mappedBy, ownerId, visited, depth, conn);
+        }
+    }
+
+    private Object fetchOneToOneMappedByWithConnection(Class<?> targetClass, String mappedBy,
+                                                       Object ownerId, Map<String, Object> visited, int depth, Connection conn)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(targetClass, connectionManager);
         String fkColumn = NamingStrategy.getOneToManyFkColumn(entityClass, mappedBy);
@@ -396,6 +420,7 @@ public class EntityMapper<T> {
                 + fkColumn + " = ?";
 
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setQueryTimeout(30);
             stmt.setObject(1, ownerId);
             ResultSet rs = stmt.executeQuery();
             if (rs.next()) {
@@ -406,7 +431,14 @@ public class EntityMapper<T> {
     }
 
     private List<?> fetchOneToMany(Class<?> elementType, String mappedBy,
-                                   Object ownerId, Map<String, Object> visited, int depth, Connection conn)
+                                   Object ownerId, Map<String, Object> visited, int depth) throws SQLException {
+        try (Connection conn = connectionManager.getConnection()) {
+            return fetchOneToManyWithConnection(elementType, mappedBy, ownerId, visited, depth, conn);
+        }
+    }
+
+    private List<?> fetchOneToManyWithConnection(Class<?> elementType, String mappedBy,
+                                                 Object ownerId, Map<String, Object> visited, int depth, Connection conn)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(elementType, connectionManager);
         String fkColumn = NamingStrategy.getOneToManyFkColumn(entityClass, mappedBy);
@@ -415,6 +447,7 @@ public class EntityMapper<T> {
 
         List<Object> result = new ArrayList<>();
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setQueryTimeout(30);
             stmt.setObject(1, ownerId);
             ResultSet rs = stmt.executeQuery();
             while (rs.next()) {
@@ -425,7 +458,14 @@ public class EntityMapper<T> {
     }
 
     private List<?> fetchManyToMany(Class<?> elementType, JoinTable jt,
-                                    Object ownerId, Map<String, Object> visited, int depth, Connection conn)
+                                    Object ownerId, Map<String, Object> visited, int depth) throws SQLException {
+        try (Connection conn = connectionManager.getConnection()) {
+            return fetchManyToManyWithConnection(elementType, jt, ownerId, visited, depth, conn);
+        }
+    }
+
+    private List<?> fetchManyToManyWithConnection(Class<?> elementType, JoinTable jt,
+                                                  Object ownerId, Map<String, Object> visited, int depth, Connection conn)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(elementType, connectionManager);
         String joinTable = NamingStrategy.getJoinTableName(entityClass, elementType, jt);
@@ -438,6 +478,7 @@ public class EntityMapper<T> {
 
         List<Object> result = new ArrayList<>();
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setQueryTimeout(30);
             stmt.setObject(1, ownerId);
             ResultSet rs = stmt.executeQuery();
             while (rs.next()) {
@@ -448,7 +489,14 @@ public class EntityMapper<T> {
     }
 
     private List<?> fetchManyToManyInverse(Class<?> elementType, String mappedBy,
-                                           Object ownerId, Map<String, Object> visited, int depth, Connection conn)
+                                           Object ownerId, Map<String, Object> visited, int depth) throws SQLException {
+        try (Connection conn = connectionManager.getConnection()) {
+            return fetchManyToManyInverseWithConnection(elementType, mappedBy, ownerId, visited, depth, conn);
+        }
+    }
+
+    private List<?> fetchManyToManyInverseWithConnection(Class<?> elementType, String mappedBy,
+                                                         Object ownerId, Map<String, Object> visited, int depth, Connection conn)
             throws SQLException {
         Field mappedField = Arrays.stream(elementType.getDeclaredFields())
                 .filter(f -> f.getName().equals(mappedBy))
@@ -456,12 +504,13 @@ public class EntityMapper<T> {
                 .orElseThrow();
 
         JoinTable jt = mappedField.getAnnotation(JoinTable.class);
-        return fetchManyToMany(elementType, jt, ownerId, visited, depth, conn);
+        return fetchManyToManyWithConnection(elementType, jt, ownerId, visited, depth, conn);
     }
 
-    private Object fetchFkValue(Object ownerId, String fkColumn, Connection conn) throws SQLException {
-        String sql = "SELECT " + fkColumn + " FROM " + getTableName() + " WHERE " + getIdColumn() + " = ?";
+    private Object fetchFkValue(Object ownerId, String fkColumn, String tableName, Connection conn) throws SQLException {
+        String sql = "SELECT " + fkColumn + " FROM " + tableName + " WHERE " + getIdColumn() + " = ?";
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setQueryTimeout(30);
             stmt.setObject(1, ownerId);
             ResultSet rs = stmt.executeQuery();
             if (rs.next()) {

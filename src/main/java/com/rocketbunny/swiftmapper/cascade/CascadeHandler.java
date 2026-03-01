@@ -7,47 +7,85 @@ import com.rocketbunny.swiftmapper.utils.logger.SwiftLogger;
 
 import java.lang.reflect.Field;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.Collection;
+import java.util.IdentityHashMap;
+import java.util.Set;
 
 public class CascadeHandler {
-    private final SwiftLogger log = SwiftLogger.getLogger(CascadeHandler.class);
     private final Connection connection;
+    private final boolean externalTransaction;
+    private final SwiftLogger log = SwiftLogger.getLogger(CascadeHandler.class);
 
     public CascadeHandler(Connection connection) {
         this.connection = connection;
+        this.externalTransaction = isTransactionActive(connection);
     }
 
-    public void handlePersist(Object entity) throws Exception {
-        processCascade(entity, CascadeType.PERSIST);
+    private boolean isTransactionActive(Connection connection) {
+        try {
+            return !connection.getAutoCommit();
+        } catch (SQLException e) {
+            return false;
+        }
     }
 
-    public void handleMerge(Object entity) throws Exception {
-        processCascade(entity, CascadeType.MERGE);
+    public void handlePrePersist(Object entity, Set<Object> visited) throws Exception {
+        processCascades(entity, CascadeType.PERSIST, visited, true);
     }
 
-    public void handleRemove(Object entity) throws Exception {
-        processCascade(entity, CascadeType.REMOVE);
+    public void handlePostPersist(Object entity, Set<Object> visited) throws Exception {
+        processCascades(entity, CascadeType.PERSIST, visited, false);
     }
 
-    private void processCascade(Object entity, CascadeType targetType) throws Exception {
-        Class<?> clazz = entity.getClass();
-        for (Field field : clazz.getDeclaredFields()) {
+    public void handleMerge(Object entity, Set<Object> visited) throws Exception {
+        processCascades(entity, CascadeType.MERGE, visited, null);
+    }
+
+    public void handleRemove(Object entity, Set<Object> visited) throws Exception {
+        processCascades(entity, CascadeType.REMOVE, visited, null);
+    }
+
+    private void processCascades(Object entity, CascadeType action, Set<Object> visited, Boolean isPre) throws Exception {
+        for (Field field : getAllFields(entity.getClass())) {
             field.setAccessible(true);
 
-            CascadeType[] cascadeTypes = getCascadeTypes(field);
-            if (cascadeTypes != null && shouldCascade(cascadeTypes, targetType)) {
+            if (isPre != null) {
+                boolean isManyToOne = field.isAnnotationPresent(ManyToOne.class);
+                boolean isOneToOne = field.isAnnotationPresent(OneToOne.class);
+                boolean isOneToMany = field.isAnnotationPresent(OneToMany.class);
+                boolean isManyToMany = field.isAnnotationPresent(ManyToMany.class);
+
+                if (isPre && !(isManyToOne || isOneToOne)) continue;
+                if (!isPre && !(isOneToMany || isManyToMany)) continue;
+            }
+
+            CascadeType[] cascades = getCascadeTypes(field);
+
+            if (cascades != null && shouldCascade(cascades, action)) {
                 Object related = field.get(entity);
                 if (related != null) {
                     if (related instanceof Collection<?> collection) {
                         for (Object item : collection) {
-                            executeCascadeAction(item, targetType);
+                            if (item != null) {
+                                executeAction(item, action, visited);
+                            }
                         }
                     } else {
-                        executeCascadeAction(related, targetType);
+                        executeAction(related, action, visited);
                     }
                 }
             }
         }
+    }
+
+    private Field[] getAllFields(Class<?> clazz) {
+        java.util.List<Field> fields = new java.util.ArrayList<>();
+        while (clazz != null && clazz != Object.class) {
+            fields.addAll(java.util.Arrays.asList(clazz.getDeclaredFields()));
+            clazz = clazz.getSuperclass();
+        }
+        return fields.toArray(new Field[0]);
     }
 
     private CascadeType[] getCascadeTypes(Field field) {
@@ -67,25 +105,38 @@ public class CascadeHandler {
         return false;
     }
 
-    private void executeCascadeAction(Object entity, CascadeType action) throws Exception {
-        Class<?> clazz = entity.getClass();
-        Session<?> session = new Session<>(connection, clazz);
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void executeAction(Object relatedEntity, CascadeType action, Set<Object> visited) throws Exception {
+        if (visited.contains(relatedEntity)) {
+            log.debug("Already visited entity {}, skipping cascade", relatedEntity.getClass().getSimpleName());
+            return;
+        }
 
-        switch (action) {
-            case PERSIST -> session.save(entity);
-            case MERGE -> session.update(entity);
-            case REMOVE -> {
-                Object id = getEntityId(entity);
-                if (id != null) {
-                    session.delete(id);
+        Class clazz = relatedEntity.getClass();
+        Session session = new Session(connection, clazz);
+        session.setExternalTransaction(externalTransaction);
+
+        try {
+            switch (action) {
+                case PERSIST -> session.saveInternal(connection, relatedEntity, visited);
+                case MERGE -> session.updateInternal(connection, relatedEntity, visited);
+                case REMOVE -> {
+                    Object id = getEntityId(relatedEntity);
+                    if (id != null) {
+                        session.deleteInternal(connection, id, visited);
+                    } else {
+                        log.warn("Cannot cascade delete entity without ID: {}", relatedEntity.getClass().getSimpleName());
+                    }
                 }
             }
-            default -> log.warn("Unknown cascade action: {}", action);
+        } catch (Exception e) {
+            log.error("Cascade action {} failed for entity {}", e, action, clazz.getSimpleName());
+            throw new SQLException("Cascade " + action + " failed for " + clazz.getSimpleName(), e);
         }
     }
 
     private Object getEntityId(Object entity) throws IllegalAccessException {
-        for (Field field : entity.getClass().getDeclaredFields()) {
+        for (Field field : getAllFields(entity.getClass())) {
             if (field.isAnnotationPresent(Id.class)) {
                 field.setAccessible(true);
                 return field.get(entity);

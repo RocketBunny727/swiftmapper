@@ -1,12 +1,11 @@
 package demonstration.model;
 
 import com.rocketbunny.swiftmapper.annotations.entity.*;
-import com.rocketbunny.swiftmapper.annotations.relationship.FetchType;
-import com.rocketbunny.swiftmapper.annotations.relationship.JoinColumn;
-import com.rocketbunny.swiftmapper.annotations.relationship.ManyToOne;
-import com.rocketbunny.swiftmapper.annotations.relationship.OneToOne;
+import com.rocketbunny.swiftmapper.annotations.relationship.*;
 import lombok.Getter;
 import lombok.Setter;
+
+import java.util.List;
 
 @Entity
 @Table(name = "tickets")
@@ -24,4 +23,12 @@ public class Ticket {
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "flight_id", nullable = false)
     private Flight flight;
+
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(
+            name = "ticket_services",
+            joinColumns = @JoinColumn(name = "ticket_id"),
+            inverseJoinColumns = @JoinColumn(name = "service_id")
+    )
+    private List<Service> services;
 }

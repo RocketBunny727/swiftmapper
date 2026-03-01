@@ -23,6 +23,12 @@ public class QueryMethodParser {
             "^(find|findAll|findFirst|findTop|count|delete|exists)(\\d*)(By)(.*)$"
     );
 
+    private static final Set<String> SQL_KEYWORDS = Set.of(
+            "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+            "TABLE", "FROM", "WHERE", "AND", "OR", "NOT", "NULL", "UNION",
+            "EXEC", "EXECUTE", "SCRIPT", "--", "/*", "*/", ";"
+    );
+
     private static final List<TokenPattern> CONDITION_PATTERNS = List.of(
             new TokenPattern("Between", " BETWEEN ? AND ?", 2),
             new TokenPattern("GreaterThanEquals", " >= ?", 1),
@@ -35,11 +41,11 @@ public class QueryMethodParser {
             new TokenPattern("Lte", " <= ?", 1),
             new TokenPattern("LessThan", " < ?", 1),
             new TokenPattern("Lt", " < ?", 1),
-            new TokenPattern("StartingWith", " LIKE ?", 1, arg -> arg + "%"),
-            new TokenPattern("EndingWith", " LIKE ?", 1, arg -> "%" + arg),
-            new TokenPattern("Containing", " LIKE ?", 1, arg -> "%" + arg + "%"),
-            new TokenPattern("Like", " LIKE ?", 1),
-            new TokenPattern("NotLike", " NOT LIKE ?", 1),
+            new TokenPattern("StartingWith", " LIKE ?", 1, arg -> escapeLikePattern(arg) + "%"),
+            new TokenPattern("EndingWith", " LIKE ?", 1, arg -> "%" + escapeLikePattern(arg)),
+            new TokenPattern("Containing", " LIKE ?", 1, arg -> "%" + escapeLikePattern(arg) + "%"),
+            new TokenPattern("Like", " LIKE ?", 1, QueryMethodParser::escapeLikePattern),
+            new TokenPattern("NotLike", " NOT LIKE ?", 1, QueryMethodParser::escapeLikePattern),
             new TokenPattern("Regex", " ~ ?", 1),
             new TokenPattern("NotIn", " NOT IN ", -1),
             new TokenPattern("Nin", " NOT IN ", -1),
@@ -61,6 +67,14 @@ public class QueryMethodParser {
 
     public QueryMethodParser(EntityMapper<?> mapper) {
         this.mapper = mapper;
+    }
+
+    private static String escapeLikePattern(Object arg) {
+        if (arg == null) return null;
+        String str = arg.toString();
+        return str.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
     }
 
     public ParsedQuery parse(Method method, Object[] args) {
@@ -128,8 +142,11 @@ public class QueryMethodParser {
     }
 
     private String escapeIdentifier(String identifier) {
-        if (identifier == null || identifier.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
-            return identifier;
+        if (identifier == null) {
+            return null;
+        }
+        if (!identifier.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
+            throw new SecurityException("Invalid SQL identifier: " + identifier);
         }
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
@@ -191,9 +208,12 @@ public class QueryMethodParser {
     }
 
     private String getActualColumnName(Class<?> entityClass, String propertyName) {
+        validatePropertyName(propertyName);
+
         String searchName = propertyName.toLowerCase();
 
-        for (Field field : entityClass.getDeclaredFields()) {
+        List<Field> allFields = getAllFields(entityClass);
+        for (Field field : allFields) {
             String fieldName = field.getName();
             String normalizedFieldName = fieldName.toLowerCase().replace("_", "");
             String normalizedSearchName = searchName.replace("_", "");
@@ -202,6 +222,7 @@ public class QueryMethodParser {
                 if (field.isAnnotationPresent(Column.class)) {
                     String colName = field.getAnnotation(Column.class).name();
                     if (colName != null && !colName.isEmpty()) {
+                        validateColumnName(colName);
                         return colName;
                     }
                 }
@@ -209,7 +230,51 @@ public class QueryMethodParser {
             }
         }
 
-        return propertyName;
+        throw new IllegalArgumentException("Property not found: " + propertyName + " in " + entityClass.getName());
+    }
+
+    private List<Field> getAllFields(Class<?> clazz) {
+        List<Field> fields = new ArrayList<>();
+        while (clazz != null && clazz != Object.class) {
+            fields.addAll(Arrays.asList(clazz.getDeclaredFields()));
+            clazz = clazz.getSuperclass();
+        }
+        return fields;
+    }
+
+    private void validatePropertyName(String propertyName) {
+        if (propertyName == null || propertyName.isEmpty()) {
+            throw new IllegalArgumentException("Property name cannot be null or empty");
+        }
+        if (propertyName.length() > 64) {
+            throw new IllegalArgumentException("Property name too long: " + propertyName);
+        }
+        String upper = propertyName.toUpperCase();
+        for (String keyword : SQL_KEYWORDS) {
+            if (upper.contains(keyword)) {
+                throw new SecurityException("SQL injection attempt detected in property: " + propertyName);
+            }
+        }
+        if (!propertyName.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
+            throw new IllegalArgumentException("Invalid property name format: " + propertyName);
+        }
+    }
+
+    private void validateColumnName(String columnName) {
+        if (columnName == null || columnName.isEmpty()) {
+            throw new IllegalArgumentException("Column name cannot be null or empty");
+        }
+        if (columnName.length() > 64) {
+            throw new IllegalArgumentException("Column name too long: " + columnName);
+        }
+
+        if (!columnName.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
+            throw new SecurityException("Invalid column name format (SQL injection prevention): " + columnName);
+        }
+
+        if (SQL_KEYWORDS.contains(columnName.toUpperCase())) {
+            throw new SecurityException("Column name cannot be a reserved SQL keyword: " + columnName);
+        }
     }
 
     private JoinInfo findExistingJoin(List<JoinInfo> joins, String foreignKey) {
@@ -223,10 +288,31 @@ public class QueryMethodParser {
 
     private String getTableName(Class<?> entityClass) {
         var table = entityClass.getAnnotation(Table.class);
+        String tableName;
         if (table != null && !table.name().isEmpty()) {
-            return table.name();
+            tableName = table.name();
+        } else {
+            tableName = entityClass.getSimpleName().toLowerCase();
         }
-        return entityClass.getSimpleName().toLowerCase();
+        validateTableName(tableName);
+        return tableName;
+    }
+
+    private void validateTableName(String tableName) {
+        if (tableName == null || tableName.isEmpty()) {
+            throw new IllegalArgumentException("Table name cannot be null or empty");
+        }
+        if (tableName.length() > 64) {
+            throw new IllegalArgumentException("Table name too long: " + tableName);
+        }
+
+        if (!tableName.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
+            throw new SecurityException("Invalid table name format (SQL injection prevention): " + tableName);
+        }
+
+        if (SQL_KEYWORDS.contains(tableName.toUpperCase())) {
+            throw new SecurityException("Table name cannot be a reserved SQL keyword: " + tableName);
+        }
     }
 
     private int buildCondition(StringBuilder sql, List<ParameterBinding> bindings,
@@ -292,16 +378,19 @@ public class QueryMethodParser {
                 var joinColumn = relField.field().getAnnotation(JoinColumn.class);
                 if (joinColumn != null && !joinColumn.name().isEmpty()) {
                     fkColumn = joinColumn.name();
+                    validateColumnName(fkColumn);
                 }
 
                 String pkColumn = "id";
                 try {
-                    for (Field f : targetClass.getDeclaredFields()) {
+                    List<Field> fields = getAllFields(targetClass);
+                    for (Field f : fields) {
                         if (f.isAnnotationPresent(Id.class)) {
                             pkColumn = f.getName();
                             if (f.isAnnotationPresent(Column.class)) {
                                 String colName = f.getAnnotation(Column.class).name();
                                 if (colName != null && !colName.isEmpty()) {
+                                    validateColumnName(colName);
                                     pkColumn = colName;
                                 }
                             }
@@ -387,11 +476,13 @@ public class QueryMethodParser {
                     if (property.isEmpty()) {
                         return new PropertyCondition(token, new TokenPattern("Equals", " = ?", 1));
                     }
+                    validatePropertyName(property);
                     return new PropertyCondition(property, pattern);
                 }
             }
         }
 
+        validatePropertyName(token);
         return new PropertyCondition(token, new TokenPattern("Equals", " = ?", 1));
     }
 
@@ -402,10 +493,18 @@ public class QueryMethodParser {
         }
 
         String property = matcher.group(1);
-        String direction = matcher.group(2) != null ? matcher.group(2) : "Asc";
+        String directionStr = matcher.group(2);
+
+        validatePropertyName(property);
+
+        SortDirection direction = SortDirection.ASC;
+        if (directionStr != null) {
+            direction = SortDirection.valueOf(directionStr.toUpperCase());
+        }
+
         String column = getActualColumnName(mapper.getEntityClass(), property);
 
-        return new OrderClause("t0." + escapeIdentifier(column) + " " + direction.toUpperCase());
+        return new OrderClause("t0." + escapeIdentifier(column) + " " + direction.name());
     }
 
     private String buildSelectClause(QueryType type) {
@@ -424,5 +523,9 @@ public class QueryMethodParser {
             case "exists" -> QueryType.EXISTS;
             default -> QueryType.SELECT;
         };
+    }
+
+    private enum SortDirection {
+        ASC, DESC
     }
 }

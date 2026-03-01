@@ -3,16 +3,21 @@ package com.rocketbunny.swiftmapper.core;
 import com.rocketbunny.swiftmapper.annotations.entity.*;
 import com.rocketbunny.swiftmapper.annotations.relationship.*;
 import com.rocketbunny.swiftmapper.cache.StatementCache;
+import com.rocketbunny.swiftmapper.cascade.CascadeHandler;
 import com.rocketbunny.swiftmapper.exception.MappingException;
 import com.rocketbunny.swiftmapper.exception.QueryException;
 import com.rocketbunny.swiftmapper.utils.naming.NamingStrategy;
 import com.rocketbunny.swiftmapper.utils.logger.SwiftLogger;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.ParameterizedType;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 
 public class Session<T> {
     private final ConnectionManager connectionManager;
@@ -20,11 +25,15 @@ public class Session<T> {
     private final SwiftLogger log = SwiftLogger.getLogger(Session.class);
     private Connection dedicatedConnection;
     private boolean externalConnection = false;
+    private boolean connectionOwner = false;
+    private boolean externalTransaction = false;
     private StatementCache statementCache;
+    private int queryTimeout = 30;
 
     public Session(ConnectionManager connectionManager, Class<T> entityClass) {
         this.connectionManager = connectionManager;
         this.entityClass = entityClass;
+        this.statementCache = connectionManager.getStatementCache();
         log.info("Session created for {}", entityClass.getSimpleName());
     }
 
@@ -33,11 +42,45 @@ public class Session<T> {
         this.entityClass = entityClass;
         this.dedicatedConnection = connection;
         this.externalConnection = true;
+        this.statementCache = null;
         log.info("Session created for {} with external connection", entityClass.getSimpleName());
     }
 
     public void setStatementCache(StatementCache cache) {
         this.statementCache = cache;
+    }
+
+    public void setExternalTransaction(boolean externalTransaction) {
+        this.externalTransaction = externalTransaction;
+    }
+
+    public void setQueryTimeout(int seconds) {
+        this.queryTimeout = seconds;
+    }
+
+    private Connection acquireConnection() throws SQLException {
+        if (dedicatedConnection != null) {
+            return dedicatedConnection;
+        }
+        if (connectionManager != null) {
+            dedicatedConnection = connectionManager.getConnection();
+            connectionOwner = true;
+            return dedicatedConnection;
+        }
+        throw new SQLException("No connection source available");
+    }
+
+    private void releaseConnection() {
+        if (connectionOwner && dedicatedConnection != null) {
+            try {
+                dedicatedConnection.close();
+            } catch (SQLException e) {
+                log.error("Failed to close connection", e);
+            } finally {
+                dedicatedConnection = null;
+                connectionOwner = false;
+            }
+        }
     }
 
     public Optional<T> findById(Object id) throws SQLException {
@@ -50,8 +93,7 @@ public class Session<T> {
         );
         log.debug("SQL: {}", sql);
 
-        Connection conn = getConnection();
-        boolean shouldClose = !externalConnection;
+        Connection conn = acquireConnection();
 
         try {
             List<T> result = executeQuery(conn, sql, id);
@@ -62,13 +104,7 @@ public class Session<T> {
             log.info("Entity found by id: {}", id);
             return Optional.of(result.get(0));
         } finally {
-            if (shouldClose && conn != null) {
-                try {
-                    conn.close();
-                } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
-                }
-            }
+            releaseConnection();
         }
     }
 
@@ -85,6 +121,7 @@ public class Session<T> {
         throw new MappingException("No @Id field found in " + entityClass.getName(), null);
     }
 
+    @SuppressWarnings("unchecked")
     private T executeInsert(Connection connection, Object entity,
                             Field idField, boolean generatedOnDb) throws SQLException, IllegalAccessException {
         String tableName = getTableName();
@@ -92,7 +129,7 @@ public class Session<T> {
         StringBuilder placeholders = new StringBuilder();
         List<Object> params = new ArrayList<>();
 
-        for (Field field : entityClass.getDeclaredFields()) {
+        for (Field field : getAllFields(entityClass)) {
             field.setAccessible(true);
 
             if (field.isAnnotationPresent(Transient.class)) continue;
@@ -103,14 +140,12 @@ public class Session<T> {
                         Object relatedId = getEntityId(relatedEntity);
                         if (relatedId != null) {
                             String fkColumn = NamingStrategy.getForeignKeyColumn(field);
-
                             columns.append(fkColumn).append(",");
                             placeholders.append("?,");
                             params.add(relatedId);
                         }
                     }
-                }
-                else if (field.isAnnotationPresent(OneToOne.class)) {
+                } else if (field.isAnnotationPresent(OneToOne.class)) {
                     OneToOne oo = field.getAnnotation(OneToOne.class);
                     if (oo.mappedBy().isEmpty()) {
                         Object relatedEntity = field.get(entity);
@@ -118,7 +153,6 @@ public class Session<T> {
                             Object relatedId = getEntityId(relatedEntity);
                             if (relatedId != null) {
                                 String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
-
                                 columns.append(fkColumn).append(",");
                                 placeholders.append("?,");
                                 params.add(relatedId);
@@ -143,6 +177,7 @@ public class Session<T> {
             log.debug("Executing SQL: {}", sql);
 
             try (PreparedStatement stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                stmt.setQueryTimeout(queryTimeout);
                 int rowsAffected = stmt.executeUpdate();
                 if (rowsAffected > 0 && generatedOnDb) {
                     try (ResultSet rs = stmt.getGeneratedKeys()) {
@@ -165,13 +200,14 @@ public class Session<T> {
 
         PreparedStatement stmt = null;
         try {
-            if (statementCache != null) {
+            if (statementCache != null && !externalConnection) {
                 stmt = statementCache.getStatement(connection, sql);
                 for (int i = 0; i < params.size(); i++) {
                     stmt.setObject(i + 1, params.get(i));
                 }
             } else {
                 stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+                stmt.setQueryTimeout(queryTimeout);
                 for (int i = 0; i < params.size(); i++) {
                     stmt.setObject(i + 1, params.get(i));
                 }
@@ -196,7 +232,7 @@ public class Session<T> {
 
             return (T) entity;
         } finally {
-            if (statementCache == null && stmt != null) {
+            if ((statementCache == null || externalConnection) && stmt != null) {
                 try {
                     stmt.close();
                 } catch (SQLException e) {
@@ -208,9 +244,8 @@ public class Session<T> {
 
     private Object getEntityId(Object entity) throws IllegalAccessException {
         if (entity == null) return null;
-
         Class<?> clazz = entity.getClass();
-        for (Field field : clazz.getDeclaredFields()) {
+        for (Field field : getAllFields(clazz)) {
             if (field.isAnnotationPresent(Id.class)) {
                 field.setAccessible(true);
                 return field.get(entity);
@@ -226,8 +261,119 @@ public class Session<T> {
                 field.isAnnotationPresent(ManyToMany.class);
     }
 
-    @SuppressWarnings("unchecked")
+    private void handleManyToMany(Connection connection, Object entity, Object ownerId) throws SQLException, IllegalAccessException {
+        for (Field field : getAllFields(entityClass)) {
+            field.setAccessible(true);
+            if (field.isAnnotationPresent(ManyToMany.class)) {
+                ManyToMany m2m = field.getAnnotation(ManyToMany.class);
+                if (m2m.mappedBy().isEmpty()) {
+                    JoinTable jt = field.getAnnotation(JoinTable.class);
+                    Class<?> targetClass = (Class<?>) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
+
+                    String joinTableName = NamingStrategy.getJoinTableName(entityClass, targetClass, jt);
+                    String ownerCol = NamingStrategy.getJoinColumnName(jt, entityClass, true);
+                    String inverseCol = NamingStrategy.getJoinColumnName(jt, targetClass, false);
+
+                    String deleteSql = String.format("DELETE FROM %s WHERE %s = ?", joinTableName, ownerCol);
+                    try (PreparedStatement deleteStmt = connection.prepareStatement(deleteSql)) {
+                        deleteStmt.setQueryTimeout(queryTimeout);
+                        deleteStmt.setObject(1, ownerId);
+                        deleteStmt.executeUpdate();
+                    }
+
+                    java.util.Collection<?> relatedItems = (java.util.Collection<?>) field.get(entity);
+                    if (relatedItems != null && !relatedItems.isEmpty()) {
+                        String insertSql = String.format("INSERT INTO %s (%s, %s) VALUES (?, ?)", joinTableName, ownerCol, inverseCol);
+                        try (PreparedStatement insertStmt = connection.prepareStatement(insertSql)) {
+                            insertStmt.setQueryTimeout(queryTimeout);
+                            for (Object item : relatedItems) {
+                                Object inverseId = getEntityId(item);
+                                if (inverseId != null) {
+                                    insertStmt.setObject(1, ownerId);
+                                    insertStmt.setObject(2, inverseId);
+                                    insertStmt.addBatch();
+                                }
+                            }
+                            insertStmt.executeBatch();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public T save(Object entity) throws SQLException, IllegalAccessException {
+        Connection conn = acquireConnection();
+        boolean shouldManageTx = connectionOwner && !externalConnection && !externalTransaction;
+
+        try {
+            if (shouldManageTx) {
+                conn.setAutoCommit(false);
+            }
+
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+            T result = saveInternal(conn, entity, visited);
+
+            if (shouldManageTx) {
+                conn.commit();
+            }
+            return result;
+        } catch (SQLException | IllegalAccessException e) {
+            if (shouldManageTx) {
+                rollbackQuietly(conn);
+            }
+            throw e;
+        } finally {
+            if (shouldManageTx) {
+                resetAutoCommitQuietly(conn);
+            }
+            releaseConnection();
+        }
+    }
+
+    public List<T> saveAll(List<?> entities) throws SQLException, IllegalAccessException {
+        if (entities == null || entities.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        Connection conn = acquireConnection();
+        boolean shouldManageTx = connectionOwner && !externalConnection && !externalTransaction;
+        List<T> results = new ArrayList<>();
+
+        try {
+            if (shouldManageTx) {
+                conn.setAutoCommit(false);
+            }
+
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+
+            for (Object entity : entities) {
+                @SuppressWarnings("unchecked")
+                T result = saveInternal(conn, entity, visited);
+                results.add(result);
+            }
+
+            if (shouldManageTx) {
+                conn.commit();
+            }
+            return results;
+        } catch (SQLException | IllegalAccessException e) {
+            if (shouldManageTx) {
+                rollbackQuietly(conn);
+            }
+            throw e;
+        } finally {
+            if (shouldManageTx) {
+                resetAutoCommitQuietly(conn);
+            }
+            releaseConnection();
+        }
+    }
+
+    public T saveInternal(Connection connection, Object entity, Set<Object> visited) throws SQLException, IllegalAccessException {
+        if (visited.contains(entity)) return (T) entity;
+        visited.add(entity);
+
         log.info("Saving entity: {}", entity.getClass().getSimpleName());
 
         Field idField = findIdField();
@@ -241,71 +387,132 @@ public class Session<T> {
 
         if (gen != null) {
             switch (gen.strategy()) {
-                case SEQUENCE:
-                    long seqVal = nextSequenceValue(tableName, idColumn, gen.startValue());
+                case SEQUENCE -> {
+                    long seqVal = nextSequenceValue(connection, tableName, idColumn, gen.startValue());
                     idField.set(entity, seqVal);
                     idValue = seqVal;
-                    break;
-
-                case PATTERN:
+                }
+                case PATTERN -> {
                     if (idField.getType() != String.class) {
                         throw new SQLException("PATTERN strategy requires String ID field");
                     }
-                    String patternId = generateStartsWithId(gen.pattern(), gen.startValue(), tableName);
+                    String patternId = generateStartsWithId(connection, gen.pattern(), gen.startValue(), tableName, idColumn);
                     idField.set(entity, patternId);
                     idValue = patternId;
-                    break;
-
-                case ALPHA:
-                    long alphaId = nextSequenceValue(tableName, idColumn, gen.startValue());
+                }
+                case ALPHA -> {
+                    long alphaId = nextSequenceValue(connection, tableName, idColumn, gen.startValue());
                     idField.set(entity, alphaId);
                     idValue = alphaId;
-                    break;
-
-                case CUSTOM:
+                }
+                case CUSTOM -> {
                     if (idValue == null) throw new SQLException("CUSTOM strategy requires manual ID");
-                    break;
-
-                default: break;
+                }
             }
         }
 
         boolean generatedOnDb = isGeneratedOnDb(gen, idValue);
 
-        Connection conn = getConnection();
-        boolean shouldClose = !externalConnection;
+        try {
+            new CascadeHandler(connection).handlePrePersist(entity, visited);
+        } catch (Exception e) {
+            throw new SQLException("Pre-Cascade persist failed", e);
+        }
+
+        T result = executeInsert(connection, entity, idField, generatedOnDb);
+        Object finalId = idField.get(result);
 
         try {
-            conn.setAutoCommit(false);
-            T result = executeInsert(conn, entity, idField, generatedOnDb);
-            conn.commit();
-            return result;
-        } catch (SQLException e) {
-            try {
-                conn.rollback();
-            } catch (SQLException ex) {
-                log.error("Rollback failed", ex);
-            }
-            throw e;
-        } finally {
-            if (shouldClose && conn != null) {
-                try {
-                    conn.close();
-                } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
-                }
-            }
+            new CascadeHandler(connection).handlePostPersist(result, visited);
+        } catch (Exception e) {
+            throw new SQLException("Post-Cascade persist failed", e);
         }
+
+        handleManyToMany(connection, result, finalId);
+
+        return result;
     }
 
     public void update(Object entity) throws SQLException {
+        Connection conn = acquireConnection();
+        boolean shouldManageTx = connectionOwner && !externalConnection && !externalTransaction;
+
+        try {
+            if (shouldManageTx) {
+                conn.setAutoCommit(false);
+            }
+
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+            updateInternal(conn, entity, visited);
+
+            if (shouldManageTx) {
+                conn.commit();
+            }
+        } catch (SQLException e) {
+            if (shouldManageTx) {
+                rollbackQuietly(conn);
+            }
+            throw e;
+        } finally {
+            if (shouldManageTx) {
+                resetAutoCommitQuietly(conn);
+            }
+            releaseConnection();
+        }
+    }
+
+    public void updateAll(List<?> entities) throws SQLException {
+        if (entities == null || entities.isEmpty()) {
+            return;
+        }
+
+        Connection conn = acquireConnection();
+        boolean shouldManageTx = connectionOwner && !externalConnection && !externalTransaction;
+
+        try {
+            if (shouldManageTx) {
+                conn.setAutoCommit(false);
+            }
+
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+
+            for (Object entity : entities) {
+                updateInternal(conn, entity, visited);
+            }
+
+            if (shouldManageTx) {
+                conn.commit();
+            }
+        } catch (SQLException e) {
+            if (shouldManageTx) {
+                rollbackQuietly(conn);
+            }
+            throw e;
+        } finally {
+            if (shouldManageTx) {
+                resetAutoCommitQuietly(conn);
+            }
+            releaseConnection();
+        }
+    }
+
+    public void updateInternal(Connection connection, Object entity, Set<Object> visited) throws SQLException {
+        if (visited.contains(entity)) return;
+        visited.add(entity);
+
         log.info("Updating entity: {}", entity.getClass().getSimpleName());
+
+        try {
+            new CascadeHandler(connection).handleMerge(entity, visited);
+        } catch (Exception e) {
+            throw new SQLException("Cascade merge failed", e);
+        }
 
         StringBuilder setClause = new StringBuilder();
         List<Object> params = new ArrayList<>();
         Object idValue = null;
 
-        for (Field field : entityClass.getDeclaredFields()) {
+        for (Field field : getAllFields(entityClass)) {
             field.setAccessible(true);
             try {
                 if (field.isAnnotationPresent(Id.class)) {
@@ -342,7 +549,6 @@ public class Session<T> {
                     params.add(field.get(entity));
                 }
             } catch (IllegalAccessException e) {
-                log.error("Cannot access field {}", e, field.getName());
                 throw new QueryException("Cannot access field " + field.getName(), e);
             }
         }
@@ -358,210 +564,180 @@ public class Session<T> {
 
         log.debug("SQL: {}", sql);
 
-        Connection conn = getConnection();
-        boolean shouldClose = !externalConnection;
+        PreparedStatement stmt = null;
+        try {
+            if (statementCache != null && !externalConnection) {
+                stmt = statementCache.getStatement(connection, sql);
+                for (int i = 0; i < params.size(); i++) {
+                    stmt.setObject(i + 1, params.get(i));
+                }
+            } else {
+                stmt = connection.prepareStatement(sql);
+                stmt.setQueryTimeout(queryTimeout);
+                for (int i = 0; i < params.size(); i++) {
+                    stmt.setObject(i + 1, params.get(i));
+                }
+            }
+
+            int rows = stmt.executeUpdate();
+            if (rows == 0) {
+                throw new QueryException("Entity not found for update", null);
+            }
+        } finally {
+            if ((statementCache == null || externalConnection) && stmt != null) {
+                try {
+                    stmt.close();
+                } catch (SQLException e) {
+                    log.warn("Failed to close statement", e);
+                }
+            }
+        }
 
         try {
-            conn.setAutoCommit(false);
-
-            PreparedStatement stmt = null;
-            try {
-                if (statementCache != null) {
-                    stmt = statementCache.getStatement(conn, sql);
-                    for (int i = 0; i < params.size(); i++) {
-                        stmt.setObject(i + 1, params.get(i));
-                    }
-                } else {
-                    stmt = conn.prepareStatement(sql);
-                    for (int i = 0; i < params.size(); i++) {
-                        stmt.setObject(i + 1, params.get(i));
-                    }
-                }
-
-                int rows = stmt.executeUpdate();
-                log.info("Rows updated: {}", rows);
-                if (rows == 0) {
-                    log.warn("No entity found to update");
-                    throw new QueryException("Entity not found for update", null);
-                }
-            } finally {
-                if (statementCache == null && stmt != null) {
-                    try {
-                        stmt.close();
-                    } catch (SQLException e) {
-                        log.warn("Failed to close statement", e);
-                    }
-                }
-            }
-
-            conn.commit();
-        } catch (SQLException e) {
-            try {
-                conn.rollback();
-            } catch (SQLException ex) {
-                log.error("Rollback failed", ex);
-            }
-            throw e;
-        } finally {
-            if (shouldClose && conn != null) {
-                try {
-                    conn.close();
-                } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
-                }
-            }
+            handleManyToMany(connection, entity, idValue);
+        } catch (IllegalAccessException e) {
+            throw new SQLException("Error handling many-to-many relationship update", e);
         }
     }
 
     public void delete(Object id) throws SQLException {
-        log.info("Deleting by ID: {}", id);
-
-        Connection conn = getConnection();
-        boolean shouldClose = !externalConnection;
+        Connection conn = acquireConnection();
+        boolean shouldManageTx = connectionOwner && !externalConnection && !externalTransaction;
 
         try {
-            conn.setAutoCommit(false);
-
-            T entity = findById(id).orElse(null);
-            if (entity != null) {
-                handleCascadeDelete(conn, entity);
+            if (shouldManageTx) {
+                conn.setAutoCommit(false);
             }
 
-            String sql = String.format("DELETE FROM %s WHERE %s = ?",
-                    getTableName(), getIdColumn());
-            log.debug("SQL: {}", sql);
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+            deleteInternal(conn, id, visited);
 
-            PreparedStatement stmt = null;
-            try {
-                if (statementCache != null) {
-                    stmt = statementCache.getStatement(conn, sql);
-                    stmt.setObject(1, id);
-                } else {
-                    stmt = conn.prepareStatement(sql);
-                    stmt.setObject(1, id);
-                }
-
-                int rows = stmt.executeUpdate();
-                log.info("Rows deleted: {}", rows);
-                if (rows == 0) {
-                    log.warn("No entity found to delete");
-                    throw new QueryException("Entity not found for delete", null);
-                }
-            } finally {
-                if (statementCache == null && stmt != null) {
-                    try {
-                        stmt.close();
-                    } catch (SQLException e) {
-                        log.warn("Failed to close statement", e);
-                    }
-                }
+            if (shouldManageTx) {
+                conn.commit();
             }
-
-            conn.commit();
         } catch (SQLException e) {
-            try {
-                conn.rollback();
-            } catch (SQLException ex) {
-                log.error("Rollback failed", ex);
+            if (shouldManageTx) {
+                rollbackQuietly(conn);
             }
             throw e;
         } finally {
-            if (shouldClose && conn != null) {
+            if (shouldManageTx) {
+                resetAutoCommitQuietly(conn);
+            }
+            releaseConnection();
+        }
+    }
+
+    public void deleteAll(List<?> ids) throws SQLException {
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
+
+        Connection conn = acquireConnection();
+        boolean shouldManageTx = connectionOwner && !externalConnection && !externalTransaction;
+
+        try {
+            if (shouldManageTx) {
+                conn.setAutoCommit(false);
+            }
+
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+
+            for (Object id : ids) {
+                deleteInternal(conn, id, visited);
+            }
+
+            if (shouldManageTx) {
+                conn.commit();
+            }
+        } catch (SQLException e) {
+            if (shouldManageTx) {
+                rollbackQuietly(conn);
+            }
+            throw e;
+        } finally {
+            if (shouldManageTx) {
+                resetAutoCommitQuietly(conn);
+            }
+            releaseConnection();
+        }
+    }
+
+    public void deleteInternal(Connection connection, Object id, Set<Object> visited) throws SQLException {
+        log.info("Deleting by ID: {}", id);
+
+        Optional<T> entityOpt = findByIdInternal(connection, id);
+        if (entityOpt.isPresent()) {
+            T entity = entityOpt.get();
+            if (visited.contains(entity)) return;
+            visited.add(entity);
+
+            try {
+                new CascadeHandler(connection).handleRemove(entity, visited);
+            } catch (Exception e) {
+                throw new SQLException("Cascade remove failed", e);
+            }
+        }
+
+        String sql = String.format("DELETE FROM %s WHERE %s = ?", getTableName(), getIdColumn());
+        log.debug("SQL: {}", sql);
+
+        PreparedStatement stmt = null;
+        try {
+            if (statementCache != null && !externalConnection) {
+                stmt = statementCache.getStatement(connection, sql);
+                stmt.setObject(1, id);
+            } else {
+                stmt = connection.prepareStatement(sql);
+                stmt.setQueryTimeout(queryTimeout);
+                stmt.setObject(1, id);
+            }
+
+            int rows = stmt.executeUpdate();
+            if (rows == 0) {
+                throw new QueryException("Entity not found for delete", null);
+            }
+        } finally {
+            if ((statementCache == null || externalConnection) && stmt != null) {
                 try {
-                    conn.close();
+                    stmt.close();
                 } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
+                    log.warn("Failed to close statement", e);
                 }
             }
         }
     }
 
-    private void handleCascadeDelete(Connection conn, Object entity) throws SQLException {
-        for (Field field : entityClass.getDeclaredFields()) {
-            field.setAccessible(true);
-
-            if (field.isAnnotationPresent(OneToMany.class)) {
-                OneToMany anno = field.getAnnotation(OneToMany.class);
-                if (shouldCascade(anno.cascade(), CascadeType.REMOVE)) {
-                    try {
-                        java.util.Collection<?> related = (java.util.Collection<?>) field.get(entity);
-                        if (related != null) {
-                            for (Object item : related) {
-                                deleteRelated(conn, item);
-                            }
-                        }
-                    } catch (IllegalAccessException e) {
-                        throw new SQLException("Cannot access field", e);
-                    }
-                }
-            } else if (field.isAnnotationPresent(OneToOne.class)) {
-                OneToOne anno = field.getAnnotation(OneToOne.class);
-                if (shouldCascade(anno.cascade(), CascadeType.REMOVE)) {
-                    try {
-                        Object related = field.get(entity);
-                        if (related != null) {
-                            deleteRelated(conn, related);
-                        }
-                    } catch (IllegalAccessException e) {
-                        throw new SQLException("Cannot access field", e);
-                    }
-                }
-            }
-        }
-    }
-
-    private boolean shouldCascade(CascadeType[] types, CascadeType target) {
-        for (CascadeType type : types) {
-            if (type == CascadeType.ALL || type == target) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void deleteRelated(Connection conn, Object entity) throws SQLException, IllegalAccessException {
-        Class<?> clazz = entity.getClass();
-        Object relatedId = getEntityId(entity);
-        if (relatedId != null) {
-            Session<?> session = new Session<>(conn, clazz);
-            session.delete(relatedId);
-        }
+    private Optional<T> findByIdInternal(Connection connection, Object id) throws SQLException {
+        String sql = String.format(
+                "SELECT * FROM %s WHERE %s = ?",
+                getTableName(),
+                getIdColumn()
+        );
+        List<T> result = executeQuery(connection, sql, id);
+        return result.isEmpty() ? Optional.empty() : Optional.of(result.get(0));
     }
 
     public List<T> findAll() throws SQLException {
         log.info("Finding all {}", entityClass.getSimpleName());
         String sql = "SELECT * FROM " + getTableName();
-        Connection conn = getConnection();
-        boolean shouldClose = !externalConnection;
+        Connection conn = acquireConnection();
 
         try {
             return executeQuery(conn, sql);
         } finally {
-            if (shouldClose && conn != null) {
-                try {
-                    conn.close();
-                } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
-                }
-            }
+            releaseConnection();
         }
     }
 
     public List<T> query(String sql, Object... params) throws SQLException {
         log.debug("Custom query: {}", sql);
-        Connection conn = getConnection();
-        boolean shouldClose = !externalConnection;
+        Connection conn = acquireConnection();
 
         try {
             return executeQuery(conn, sql, params);
         } finally {
-            if (shouldClose && conn != null) {
-                try {
-                    conn.close();
-                } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
-                }
-            }
+            releaseConnection();
         }
     }
 
@@ -574,7 +750,7 @@ public class Session<T> {
         ResultSet rs = null;
 
         try {
-            if (statementCache != null) {
+            if (statementCache != null && !externalConnection) {
                 stmt = statementCache.getStatement(connection, sql);
                 if (params != null) {
                     for (int i = 0; i < params.length; i++) {
@@ -583,6 +759,7 @@ public class Session<T> {
                 }
             } else {
                 stmt = connection.prepareStatement(sql);
+                stmt.setQueryTimeout(queryTimeout);
                 if (params != null) {
                     for (int i = 0; i < params.length; i++) {
                         stmt.setObject(i + 1, params[i]);
@@ -602,7 +779,7 @@ public class Session<T> {
                     log.warn("Failed to close result set", e);
                 }
             }
-            if (statementCache == null && stmt != null) {
+            if ((statementCache == null || externalConnection) && stmt != null) {
                 try {
                     stmt.close();
                 } catch (SQLException e) {
@@ -610,16 +787,12 @@ public class Session<T> {
                 }
             }
         }
-
-        log.info("Query returned {} rows", result.size());
         return result;
     }
 
     private Field findIdField() {
         for (Field field : entityClass.getDeclaredFields()) {
-            if (field.isAnnotationPresent(Id.class)) {
-                return field;
-            }
+            if (field.isAnnotationPresent(Id.class)) return field;
         }
         throw new MappingException("No @Id field found in " + entityClass.getName(), null);
     }
@@ -633,65 +806,51 @@ public class Session<T> {
         return gen.strategy() == Strategy.IDENTITY || (gen.strategy() == Strategy.AUTO && currentIdValue == null);
     }
 
-    private long nextSequenceValue(String tableName, String idColumn, long startValue) throws SQLException {
+    private long nextSequenceValue(Connection connection, String tableName, String idColumn, long startValue) throws SQLException {
         String seqName = NamingStrategy.getSequenceName(tableName, idColumn);
         String checkSql = "SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = ?";
         boolean exists = false;
 
-        Connection conn = getConnection();
-        boolean shouldClose = !externalConnection;
+        String dbName = connection.getMetaData().getDatabaseProductName().toLowerCase();
+        boolean isPostgres = dbName.contains("postgresql");
 
-        try {
-            String dbName = conn.getMetaData().getDatabaseProductName().toLowerCase();
-            boolean isPostgres = dbName.contains("postgresql");
-
-            if (isPostgres) {
-                try (PreparedStatement stmt = conn.prepareStatement(checkSql)) {
-                    stmt.setString(1, seqName);
-                    try (ResultSet rs = stmt.executeQuery()) {
-                        exists = rs.next();
-                    }
-                }
-            } else {
-                exists = true;
-            }
-
-            if (!exists && isPostgres) {
-                String createSql = String.format(
-                        "CREATE SEQUENCE %s START WITH %d OWNED BY %s.%s",
-                        seqName, startValue, tableName, idColumn
-                );
-                try (Statement stmt = conn.createStatement()) {
-                    stmt.execute(createSql);
-                    log.info("Created sequence {} on demand", seqName);
+        if (isPostgres) {
+            try (PreparedStatement stmt = connection.prepareStatement(checkSql)) {
+                stmt.setString(1, seqName);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    exists = rs.next();
                 }
             }
+        } else {
+            exists = true;
+        }
 
-            String sql = isPostgres
-                    ? String.format("SELECT nextval('%s')", seqName)
-                    : String.format("SELECT NEXT VALUE FOR %s", seqName);
-
-            try (Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
-                if (rs.next()) {
-                    return rs.getLong(1);
-                }
-            }
-            throw new SQLException("Could not increment sequence: " + seqName);
-        } finally {
-            if (shouldClose && conn != null) {
-                try {
-                    conn.close();
-                } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
-                }
+        if (!exists && isPostgres) {
+            String createSql = String.format(
+                    "CREATE SEQUENCE %s START WITH %d OWNED BY %s.%s",
+                    seqName, startValue, tableName, idColumn
+            );
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute(createSql);
             }
         }
+
+        String sql = isPostgres
+                ? String.format("SELECT nextval('%s')", seqName)
+                : String.format("SELECT NEXT VALUE FOR %s", seqName);
+
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+        }
+        throw new SQLException("Could not increment sequence: " + seqName);
     }
 
-    private String generateStartsWithId(String pattern, long startsWith, String tableName) throws SQLException {
+    private String generateStartsWithId(Connection connection, String pattern, long startsWith, String tableName, String idColumn) throws SQLException {
         String p = (pattern == null || pattern.isEmpty()) ? tableName.toUpperCase() + "_" : pattern;
-        long nextNumber = nextSequenceValue(tableName, getIdColumn(), startsWith);
+        long nextNumber = nextSequenceValue(connection, tableName, idColumn, startsWith);
         return p + nextNumber;
     }
 
@@ -703,35 +862,42 @@ public class Session<T> {
             String seqName = NamingStrategy.getSequenceName(getTableName(), getIdColumn());
             long startValue = gen.startValue();
 
-            log.info("Resetting sequence {} to {}", seqName, startValue);
             String sql = String.format("ALTER SEQUENCE %s RESTART WITH %d", seqName, startValue);
 
-            Connection conn = getConnection();
-            boolean shouldClose = !externalConnection;
+            Connection conn = acquireConnection();
 
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute(sql);
             } catch (SQLException e) {
-                log.warn("Could not reset sequence (maybe it doesn't exist yet): {}", e.getMessage());
+                log.warn("Could not reset sequence: {}", e.getMessage());
             } finally {
-                if (shouldClose && conn != null) {
-                    try {
-                        conn.close();
-                    } catch (SQLException e) {
-                        log.error("Failed to close connection", e);
-                    }
-                }
+                releaseConnection();
             }
         }
     }
 
-    private Connection getConnection() throws SQLException {
-        if (dedicatedConnection != null) {
-            return dedicatedConnection;
+    private Field[] getAllFields(Class<?> clazz) {
+        java.util.List<Field> fields = new java.util.ArrayList<>();
+        while (clazz != null && clazz != Object.class) {
+            fields.addAll(java.util.Arrays.asList(clazz.getDeclaredFields()));
+            clazz = clazz.getSuperclass();
         }
-        if (connectionManager != null) {
-            return connectionManager.getConnection();
+        return fields.toArray(new Field[0]);
+    }
+
+    private void rollbackQuietly(Connection conn) {
+        try {
+            conn.rollback();
+        } catch (SQLException ex) {
+            log.error("Rollback failed", ex);
         }
-        throw new SQLException("No connection source available");
+    }
+
+    private void resetAutoCommitQuietly(Connection conn) {
+        try {
+            conn.setAutoCommit(true);
+        } catch (SQLException e) {
+            log.warn("Failed to restore autoCommit", e);
+        }
     }
 }

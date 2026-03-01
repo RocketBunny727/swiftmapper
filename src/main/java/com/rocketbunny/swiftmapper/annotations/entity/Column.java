@@ -11,4 +11,5 @@ public @interface Column {
     String name() default "";
     String sqlType() default "";
     boolean nullable() default true;
+    boolean unique() default false;
 }

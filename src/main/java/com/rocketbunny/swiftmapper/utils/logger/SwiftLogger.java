@@ -59,6 +59,11 @@ public class SwiftLogger {
         errorH(formatMessage(msg, varargs));
         t.printStackTrace();
     }
+
+    public void error(String msg, Object ... varargs) {
+        errorH(formatMessage(msg, varargs));
+    }
+
     private static String formatMessage(String base, Object[] varargs) {
         if (base == null) return null;
         if (varargs == null || varargs.length == 0) return base;

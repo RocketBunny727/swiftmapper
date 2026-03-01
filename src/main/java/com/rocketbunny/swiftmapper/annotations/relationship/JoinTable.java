@@ -9,6 +9,6 @@ import java.lang.annotation.Target;
 @Target(ElementType.FIELD)
 public @interface JoinTable {
     String name() default "";
-    String joinColumn() default "";
-    String inverseJoinColumn() default "";
+    JoinColumn[] joinColumns() default {};
+    JoinColumn[] inverseJoinColumns() default {};
 }

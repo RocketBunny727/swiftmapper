@@ -10,8 +10,11 @@ import com.rocketbunny.swiftmapper.exception.ConnectionException;
 import com.rocketbunny.swiftmapper.utils.naming.NamingStrategy;
 import com.rocketbunny.swiftmapper.utils.logger.SwiftLogger;
 import com.rocketbunny.swiftmapper.repository.SwiftRepository;
+import lombok.Getter;
 
+import java.awt.*;
 import java.lang.reflect.Field;
+import java.lang.reflect.ParameterizedType;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -27,21 +30,35 @@ public class ConnectionManager {
     private final String url;
     private final String username;
     private final String password;
+    @Getter
     private final StatementCache statementCache;
     private static final SwiftLogger log = SwiftLogger.getLogger(ConnectionManager.class);
 
     public static ConnectionManager fromConfig() {
         ConfigReader configReader = new ConfigReader();
         DatasourceConfig ds = configReader.getDatasourceConfig();
-        log.info("Loaded datasource config: {}@{}", ds.getUsername(), ds.getUrl());
-        return new ConnectionManager(ds);
+        log.info("Loaded datasource config: {}@{}", ds.username(), ds.url());
+
+        ConnectionManager manager = new ConnectionManager(ds);
+
+        if (ds.migrationsLocation() != null && !ds.migrationsLocation().isBlank()) {
+            com.rocketbunny.swiftmapper.migration.MigrationRunner runner =
+                    new com.rocketbunny.swiftmapper.migration.MigrationRunner(manager.connectionPool.getDataSource(), ds.migrationsLocation());
+            try {
+                runner.runMigrations();
+            } catch (SQLException e) {
+                throw new ConnectionException("Failed to run migrations from " + ds.migrationsLocation(), e);
+            }
+        }
+
+        return manager;
     }
 
     private ConnectionManager(DatasourceConfig dsConfig) {
         this.connectionPool = new ConnectionPool(dsConfig);
-        this.url = dsConfig.getUrl();
-        this.username = dsConfig.getUsername();
-        this.password = dsConfig.getPassword();
+        this.url = dsConfig.url();
+        this.username = dsConfig.username();
+        this.password = dsConfig.password();
         this.statementCache = new StatementCache(100);
     }
 
@@ -49,21 +66,37 @@ public class ConnectionManager {
         return connectionPool.getConnection();
     }
 
-    public StatementCache getStatementCache() {
-        return statementCache;
-    }
-
     public ConnectionManager initSchema(Class<?>... entityClasses) throws SQLException {
-        try (Connection connection = getConnection()) {
+        Connection connection = null;
+        boolean originalAutoCommit = true;
+
+        try {
+            connection = getConnection();
+            originalAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(true);
 
             for (Class<?> entityClass : entityClasses) {
                 createTable(connection, entityClass);
             }
 
-            connection.setAutoCommit(false);
+            for (Class<?> entityClass : entityClasses) {
+                createJoinTables(connection, entityClass);
+            }
         } catch (SQLException e) {
             throw new ConnectionException("Failed to initialize schema", e);
+        } finally {
+            if (connection != null) {
+                try {
+                    connection.setAutoCommit(originalAutoCommit);
+                } catch (SQLException e) {
+                    log.warn("Failed to restore autoCommit state", e);
+                }
+                try {
+                    connection.close();
+                } catch (SQLException e) {
+                    log.error("Failed to close connection", e);
+                }
+            }
         }
         return this;
     }
@@ -160,7 +193,17 @@ public class ConnectionManager {
             } else if (!isRelationshipField(field)) {
                 String colName = NamingStrategy.getColumnName(field);
                 String sqlType = getSqlType(field, false, null);
-                columns.add(colName + " " + sqlType);
+
+                boolean isNullable = true;
+                boolean isUnique = false;
+                if (field.isAnnotationPresent(Column.class)) {
+                    isNullable = field.getAnnotation(Column.class).nullable();
+                    isUnique = field.getAnnotation(Column.class).unique();
+                }
+                String notNullClause = isNullable ? "" : " NOT NULL";
+                String uniqueClause = isUnique ? " UNIQUE" : "";
+
+                columns.add(colName + " " + sqlType + notNullClause + uniqueClause);
             }
         }
 
@@ -187,6 +230,68 @@ public class ConnectionManager {
                 }
             } else {
                 log.info("FK {} already exists", entry.getKey());
+            }
+        }
+    }
+
+    private void createJoinTables(Connection connection, Class<?> entityClass) {
+        String ownerTableName = NamingStrategy.getTableName(entityClass);
+
+        for (Field field : entityClass.getDeclaredFields()) {
+            field.setAccessible(true);
+            if (field.isAnnotationPresent(ManyToMany.class)) {
+                ManyToMany m2m = field.getAnnotation(ManyToMany.class);
+
+                if (m2m.mappedBy().isEmpty()) {
+                    try {
+                        createJoinTableDefinition(connection, ownerTableName, entityClass, field);
+                    } catch (Exception e) {
+                        log.warn("Failed to create join table for field {}: {}", field.getName(), e.getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    private void createJoinTableDefinition(Connection connection, String ownerTableName, Class<?> ownerClass, Field field) throws SQLException {
+        JoinTable jt = field.getAnnotation(JoinTable.class);
+        Class<?> targetClass = (Class<?>) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
+        String targetTableName = NamingStrategy.getTableName(targetClass);
+
+        String joinTableName = NamingStrategy.getJoinTableName(ownerClass, targetClass, jt);
+        String joinCol = NamingStrategy.getJoinColumnName(jt, ownerClass, true);
+        String inverseCol = NamingStrategy.getJoinColumnName(jt, targetClass, false);
+
+        String ownerIdType = getTargetIdSqlType(ownerClass);
+        String targetIdType = getTargetIdSqlType(targetClass);
+
+        String sql = String.format("CREATE TABLE IF NOT EXISTS %s (%s %s NOT NULL, %s %s NOT NULL, PRIMARY KEY (%s, %s))",
+                joinTableName, joinCol, ownerIdType, inverseCol, targetIdType, joinCol, inverseCol);
+
+        log.info("Creating join table: {}", sql);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(sql);
+        }
+
+        String fk1Name = NamingStrategy.getFkConstraintName(joinTableName, joinCol);
+        String fk2Name = NamingStrategy.getFkConstraintName(joinTableName, inverseCol);
+
+        String ownerIdCol = NamingStrategy.getIdColumnName(getIdField(ownerClass));
+        String targetIdCol = NamingStrategy.getIdColumnName(getIdField(targetClass));
+
+        addForeignKey(connection, joinTableName, fk1Name, joinCol, ownerTableName, ownerIdCol);
+        addForeignKey(connection, joinTableName, fk2Name, inverseCol, targetTableName, targetIdCol);
+    }
+
+    private void addForeignKey(Connection connection, String table, String fkName, String col, String refTable, String refCol) {
+        if (!constraintExists(connection, fkName)) {
+            String sql = String.format("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s) ON DELETE CASCADE",
+                    table, fkName, col, refTable, refCol);
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute(sql);
+                log.info("Created FK: {}", sql);
+            } catch (SQLException e) {
+                log.warn("Error creating FK {}: {}", fkName, e.getMessage());
             }
         }
     }
@@ -301,7 +406,7 @@ public class ConnectionManager {
         log.info("Connection pool closed");
     }
 
-    public <T> SwiftRepository<T, Long> repository(Class<T> entityClass) {
+    public <T, ID> SwiftRepository<T, ID> repository(Class<T> entityClass, Class<ID> idClass) {
         return new SwiftRepository<>(this, entityClass);
     }
 }

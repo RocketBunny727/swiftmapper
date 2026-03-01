@@ -32,6 +32,15 @@ public class SwiftRepository<T, ID> implements Repository<T, ID> {
         }
     }
 
+    public List<T> saveAll(List<T> entities) {
+        try {
+            Session<T> session = createSession();
+            return session.saveAll(entities);
+        } catch (Exception e) {
+            throw new RuntimeException("Batch save failed", e);
+        }
+    }
+
     @Override
     public Optional<T> findById(ID id) {
         try {
@@ -52,6 +61,15 @@ public class SwiftRepository<T, ID> implements Repository<T, ID> {
         }
     }
 
+    public void updateAll(List<T> entities) {
+        try {
+            Session<T> session = createSession();
+            session.updateAll(entities);
+        } catch (Exception e) {
+            throw new RuntimeException("Batch update failed", e);
+        }
+    }
+
     @Override
     public void delete(ID id) {
         try {
@@ -59,6 +77,15 @@ public class SwiftRepository<T, ID> implements Repository<T, ID> {
             session.delete(id);
         } catch (Exception e) {
             throw new RuntimeException("Delete failed", e);
+        }
+    }
+
+    public void deleteAll(List<ID> ids) {
+        try {
+            Session<T> session = createSession();
+            session.deleteAll(ids);
+        } catch (Exception e) {
+            throw new RuntimeException("Batch delete failed", e);
         }
     }
 
