@@ -1,6 +1,6 @@
 package demonstration.model;
 
-import com.rocketbunny.swiftmapper.annotations.entity.*;
+import io.github.rocketbunny727.swiftmapper.annotations.entity.*;
 import lombok.Getter;
 import lombok.Setter;
 

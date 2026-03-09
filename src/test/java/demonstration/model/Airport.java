@@ -1,7 +1,7 @@
 package demonstration.model;
 
-import com.rocketbunny.swiftmapper.annotations.entity.*;
-import com.rocketbunny.swiftmapper.annotations.validation.Valid;
+import io.github.rocketbunny727.swiftmapper.annotations.entity.*;
+import io.github.rocketbunny727.swiftmapper.annotations.validation.Valid;
 import lombok.Getter;
 import lombok.Setter;
 

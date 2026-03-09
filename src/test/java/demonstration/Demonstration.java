@@ -1,13 +1,13 @@
 package demonstration;
 
-import com.rocketbunny.swiftmapper.utils.greeting.GreetingManager;
+import io.github.rocketbunny727.swiftmapper.utils.greeting.GreetingManager;
 import demonstration.model.*;
 import demonstration.repostiory.*;
-import com.rocketbunny.swiftmapper.core.SwiftMapperContext;
-import com.rocketbunny.swiftmapper.core.Transaction;
-import com.rocketbunny.swiftmapper.core.TransactionTemplate;
-import com.rocketbunny.swiftmapper.criteria.CriteriaBuilder;
-import com.rocketbunny.swiftmapper.monitoring.MetricsCollector;
+import io.github.rocketbunny727.swiftmapper.core.SwiftMapperContext;
+import io.github.rocketbunny727.swiftmapper.core.Transaction;
+import io.github.rocketbunny727.swiftmapper.core.TransactionTemplate;
+import io.github.rocketbunny727.swiftmapper.criteria.CriteriaBuilder;
+import io.github.rocketbunny727.swiftmapper.monitoring.MetricsCollector;
 
 import java.sql.SQLException;
 import java.time.LocalDate;

@@ -1,7 +1,7 @@
 package demonstration.repostiory;
 
 import demonstration.model.Ticket;
-import com.rocketbunny.swiftmapper.repository.Repository;
+import io.github.rocketbunny727.swiftmapper.repository.Repository;
 
 public interface TicketRepository extends Repository<Ticket, String> {
 }

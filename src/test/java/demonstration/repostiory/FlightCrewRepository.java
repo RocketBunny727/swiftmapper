@@ -1,7 +1,7 @@
 package demonstration.repostiory;
 
 import demonstration.model.FlightCrew;
-import com.rocketbunny.swiftmapper.repository.Repository;
+import io.github.rocketbunny727.swiftmapper.repository.Repository;
 
 import java.util.Optional;
 

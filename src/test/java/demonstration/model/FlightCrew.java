@@ -1,9 +1,9 @@
 package demonstration.model;
 
-import com.rocketbunny.swiftmapper.annotations.entity.*;
-import com.rocketbunny.swiftmapper.annotations.relationship.FetchType;
-import com.rocketbunny.swiftmapper.annotations.relationship.JoinColumn;
-import com.rocketbunny.swiftmapper.annotations.relationship.ManyToOne;
+import io.github.rocketbunny727.swiftmapper.annotations.entity.*;
+import io.github.rocketbunny727.swiftmapper.annotations.relationship.FetchType;
+import io.github.rocketbunny727.swiftmapper.annotations.relationship.JoinColumn;
+import io.github.rocketbunny727.swiftmapper.annotations.relationship.ManyToOne;
 import lombok.Getter;
 import lombok.Setter;
 

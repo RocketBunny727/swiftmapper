@@ -1,8 +1,8 @@
 package demonstration.model;
 
-import com.rocketbunny.swiftmapper.annotations.entity.*;
-import com.rocketbunny.swiftmapper.annotations.relationship.CascadeType;
-import com.rocketbunny.swiftmapper.annotations.relationship.ManyToMany;
+import io.github.rocketbunny727.swiftmapper.annotations.entity.*;
+import io.github.rocketbunny727.swiftmapper.annotations.relationship.CascadeType;
+import io.github.rocketbunny727.swiftmapper.annotations.relationship.ManyToMany;
 import lombok.Getter;
 import lombok.Setter;
 
