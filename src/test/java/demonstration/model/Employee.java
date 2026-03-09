@@ -16,15 +16,21 @@ public class Employee {
     private String id;
 
     @Column(nullable = false)
-    private String full_name;
+    private String fullName;
 
     @Column(nullable = false)
     private String position;
 
     @Column(nullable = false)
-    private LocalDate hire_date;
+    private LocalDate hireDate;
 
     @Column(nullable = false)
-    private LocalDate birth_date;
+    private LocalDate birthDate;
+
+    @Override
+    public String toString() {
+        return "Employee [ID = " + id + ", full name=" + fullName + ", position=" + position +
+                ", hireDate=" + hireDate + ", birthDate=" + birthDate + "]";
+    }
 }
 

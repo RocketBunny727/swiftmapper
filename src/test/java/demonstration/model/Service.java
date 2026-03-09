@@ -28,6 +28,6 @@ public class Service {
 
     @Override
     public String toString() {
-        return "Service [ID=" + id + " | " + name + " - $" + price + "]";
+        return "Service [ID = " + id + " | " + name + " - $" + price + "]";
     }
 }

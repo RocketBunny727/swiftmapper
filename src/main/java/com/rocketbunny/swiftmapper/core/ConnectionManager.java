@@ -2,6 +2,7 @@ package com.rocketbunny.swiftmapper.core;
 
 import com.rocketbunny.swiftmapper.annotations.entity.*;
 import com.rocketbunny.swiftmapper.annotations.relationship.*;
+import com.rocketbunny.swiftmapper.annotations.validation.Check;
 import com.rocketbunny.swiftmapper.cache.StatementCache;
 import com.rocketbunny.swiftmapper.config.DatasourceConfig;
 import com.rocketbunny.swiftmapper.config.ConfigReader;
@@ -12,7 +13,6 @@ import com.rocketbunny.swiftmapper.utils.logger.SwiftLogger;
 import com.rocketbunny.swiftmapper.repository.SwiftRepository;
 import lombok.Getter;
 
-import java.awt.*;
 import java.lang.reflect.Field;
 import java.lang.reflect.ParameterizedType;
 import java.sql.Connection;
@@ -118,10 +118,17 @@ public class ConnectionManager {
             throw new IllegalArgumentException(entityClass + " must be @Entity");
         }
 
+        Check classCheck = entityClass.getAnnotation(Check.class);
+        if (classCheck != null) {
+            log.info("Table {} has class-level check constraint: {}", entityClass.getSimpleName(), classCheck.value());
+        }
+
         String tableName = NamingStrategy.getTableName(entityClass);
 
         List<String> columns = new ArrayList<>();
+        List<String> tableConstraints = new ArrayList<>();
         Map<String, String> foreignKeys = new LinkedHashMap<>();
+        List<String> indexes = new ArrayList<>();
         GeneratedValue idGen = null;
         Field idField = null;
         boolean needSequence = false;
@@ -140,6 +147,15 @@ public class ConnectionManager {
             field.setAccessible(true);
 
             if (field.isAnnotationPresent(Transient.class)) continue;
+
+            if (field.isAnnotationPresent(Index.class)) {
+                Index idx = field.getAnnotation(Index.class);
+                String colName = NamingStrategy.getColumnName(field);
+                String idxName = idx.name().isEmpty() ?
+                        "idx_" + tableName + "_" + colName : idx.name();
+                indexes.add(String.format("CREATE %sINDEX %s ON %s(%s)",
+                        idx.unique() ? "UNIQUE " : "", idxName, tableName, colName));
+            }
 
             if (field.isAnnotationPresent(Id.class)) {
                 String colDef = createIdColumnDefinition(NamingStrategy.getIdColumnName(idField), idField, idGen);
@@ -196,19 +212,65 @@ public class ConnectionManager {
 
                 boolean isNullable = true;
                 boolean isUnique = false;
+                String defaultValue = null;
+                String checkConstraint = null;
+
                 if (field.isAnnotationPresent(Column.class)) {
-                    isNullable = field.getAnnotation(Column.class).nullable();
-                    isUnique = field.getAnnotation(Column.class).unique();
+                    Column col = field.getAnnotation(Column.class);
+                    isNullable = col.nullable();
+                    isUnique = col.unique();
                 }
+
+                if (field.isAnnotationPresent(DefaultValue.class)) {
+                    DefaultValue dv = field.getAnnotation(DefaultValue.class);
+                    defaultValue = dv.value();
+                }
+
+                if (field.isAnnotationPresent(ColumnDefinition.class)) {
+                    ColumnDefinition cd = field.getAnnotation(ColumnDefinition.class);
+                    sqlType = cd.value();
+                }
+
+                if (field.isAnnotationPresent(Lob.class)) {
+                    Lob lob = field.getAnnotation(Lob.class);
+                    sqlType = lob.type() == Lob.LobType.BLOB ? "BLOB" : "CLOB";
+                }
+
+                if (field.isAnnotationPresent(Temporal.class)) {
+                    Temporal temporal = field.getAnnotation(Temporal.class);
+                    sqlType = switch (temporal.value()) {
+                        case DATE -> "DATE";
+                        case TIME -> "TIME";
+                        case TIMESTAMP -> "TIMESTAMP";
+                    };
+                }
+
                 String notNullClause = isNullable ? "" : " NOT NULL";
                 String uniqueClause = isUnique ? " UNIQUE" : "";
+                String defaultClause = defaultValue != null ? " DEFAULT " + defaultValue : "";
 
-                columns.add(colName + " " + sqlType + notNullClause + uniqueClause);
+                if (field.isAnnotationPresent(Check.class)) {
+                    Check check = field.getAnnotation(Check.class);
+                    checkConstraint = " CHECK (" + check.value() + ")";
+                }
+
+                columns.add(colName + " " + sqlType + notNullClause + uniqueClause + defaultClause +
+                        (checkConstraint != null ? checkConstraint : ""));
             }
         }
 
+        if (classCheck != null) {
+            tableConstraints.add("CONSTRAINT chk_" + tableName + " CHECK (" + classCheck.value() + ")");
+        }
+
         StringBuilder sql = new StringBuilder("CREATE TABLE IF NOT EXISTS ");
-        sql.append(tableName).append("(").append(String.join(", ", columns)).append(")");
+        sql.append(tableName).append("(").append(String.join(", ", columns));
+
+        if (!tableConstraints.isEmpty()) {
+            sql.append(", ").append(String.join(", ", tableConstraints));
+        }
+
+        sql.append(")");
 
         log.info("Creating table: {}", sql);
         try (Statement stmt = connection.createStatement()) {
@@ -230,6 +292,15 @@ public class ConnectionManager {
                 }
             } else {
                 log.info("FK {} already exists", entry.getKey());
+            }
+        }
+
+        for (String indexSql : indexes) {
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute(indexSql);
+                log.info("Created index: {}", indexSql);
+            } catch (SQLException e) {
+                log.warn("Failed to create index: {}", e.getMessage());
             }
         }
     }
@@ -372,6 +443,13 @@ public class ConnectionManager {
     }
 
     private String getSqlType(Field field, boolean isId, GeneratedValue gen) {
+        if (field.isAnnotationPresent(ColumnDefinition.class)) {
+            ColumnDefinition cd = field.getAnnotation(ColumnDefinition.class);
+            if (!cd.value().isEmpty()) {
+                return cd.value();
+            }
+        }
+
         if (field.isAnnotationPresent(Column.class)) {
             String customType = field.getAnnotation(Column.class).sqlType();
             if (!customType.isEmpty()) return customType;
@@ -389,13 +467,31 @@ public class ConnectionManager {
                     "INTEGER GENERATED BY DEFAULT AS IDENTITY";
         }
 
+        if (field.isAnnotationPresent(Lob.class)) {
+            Lob lob = field.getAnnotation(Lob.class);
+            return lob.type() == Lob.LobType.BLOB ? "BLOB" : "CLOB";
+        }
+
+        if (field.isAnnotationPresent(Temporal.class)) {
+            Temporal temporal = field.getAnnotation(Temporal.class);
+            return switch (temporal.value()) {
+                case DATE -> "DATE";
+                case TIME -> "TIME";
+                case TIMESTAMP -> "TIMESTAMP";
+            };
+        }
+
         return switch (type.getSimpleName()) {
             case "Long", "long" -> "BIGINT";
             case "Integer", "int" -> "INTEGER";
             case "Double", "double" -> "DOUBLE PRECISION";
+            case "Float", "float" -> "REAL";
             case "Boolean", "boolean" -> "BOOLEAN";
             case "LocalDateTime" -> "TIMESTAMP";
             case "LocalDate" -> "DATE";
+            case "LocalTime" -> "TIME";
+            case "byte[]" -> "BYTEA";
+            case "Byte[]" -> "BYTEA";
             default -> "VARCHAR(255)";
         };
     }
@@ -407,6 +503,6 @@ public class ConnectionManager {
     }
 
     public <T, ID> SwiftRepository<T, ID> repository(Class<T> entityClass, Class<ID> idClass) {
-        return new SwiftRepository<>(this, entityClass);
+        return new SwiftRepository<>(this, entityClass, idClass);
     }
 }

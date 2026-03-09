@@ -29,7 +29,8 @@ public class EntityMapper<T> {
     private static final SwiftLogger log = SwiftLogger.getLogger(EntityMapper.class);
     private static final Map<Class<?>, EntityMapper<?>> cache = new ConcurrentHashMap<>();
     private static final int MAX_DEPTH = 10;
-    private static final int MAX_CACHE_SIZE = 1000;
+    private static final int MAX_CACHE_SIZE = 100;
+    private static final int MAX_CONNECTIONS_PER_OPERATION = 5;
 
     public EntityMapper(Class<T> entityClass, ConnectionManager connectionManager) {
         this.entityClass = entityClass;
@@ -186,9 +187,16 @@ public class EntityMapper<T> {
                 }
             }
 
+            int eagerCount = 0;
             for (RelationshipField relField : relationshipFields.values()) {
                 if (shouldFetchEager(relField)) {
-                    loadRelationship(entity, relField, rs, visited, depth + 1);
+                    if (eagerCount >= MAX_CONNECTIONS_PER_OPERATION) {
+                        log.warn("Max eager connections reached, switching to lazy for remaining fields");
+                        setLazyProxy(entity, relField, id);
+                    } else {
+                        eagerCount++;
+                        loadRelationship(entity, relField, rs, visited, depth + 1);
+                    }
                 } else {
                     setLazyProxy(entity, relField, id);
                 }
@@ -203,10 +211,22 @@ public class EntityMapper<T> {
     private boolean shouldFetchEager(RelationshipField relField) {
         Field field = relField.field();
         return switch (relField.type()) {
-            case ONE_TO_ONE -> field.getAnnotation(OneToOne.class).fetch() == FetchType.EAGER;
-            case MANY_TO_ONE -> field.getAnnotation(ManyToOne.class).fetch() == FetchType.EAGER;
-            case ONE_TO_MANY -> field.getAnnotation(OneToMany.class).fetch() == FetchType.EAGER;
-            case MANY_TO_MANY -> field.getAnnotation(ManyToMany.class).fetch() == FetchType.EAGER;
+            case ONE_TO_ONE -> {
+                OneToOne anno = field.getAnnotation(OneToOne.class);
+                yield anno == null || anno.fetch() == FetchType.EAGER;
+            }
+            case MANY_TO_ONE -> {
+                ManyToOne anno = field.getAnnotation(ManyToOne.class);
+                yield anno == null || anno.fetch() == FetchType.EAGER;
+            }
+            case ONE_TO_MANY -> {
+                OneToMany anno = field.getAnnotation(OneToMany.class);
+                yield anno != null && anno.fetch() == FetchType.EAGER;
+            }
+            case MANY_TO_MANY -> {
+                ManyToMany anno = field.getAnnotation(ManyToMany.class);
+                yield anno != null && anno.fetch() == FetchType.EAGER;
+            }
         };
     }
 

@@ -22,5 +22,5 @@ public class FlightCrew {
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "co_pilot_id", nullable = false)
-    private Employee co_pilot;
+    private Employee coPilot;
 }

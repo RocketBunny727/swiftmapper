@@ -4,5 +4,26 @@ swiftmapper:
     username: postgres
     password: 471979
     driver-class-name: org.postgresql.Driver
+
   migrations:
     location: db/migrations
+
+  logging:
+    level: DEBUG
+    sql: true
+    transactions: true
+    slow-query-threshold: 1000
+
+  cache:
+    enabled: true
+    max-size: 1000
+    expire-minutes: 10
+    provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
+
+  pool:
+    max-size: 10
+    min-idle: 5
+    connection-timeout: 30000
+    idle-timeout: 600000
+    max-lifetime: 1800000
+    leak-detection-threshold: 60000

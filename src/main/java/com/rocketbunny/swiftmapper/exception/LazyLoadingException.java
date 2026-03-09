@@ -1,6 +1,6 @@
 package com.rocketbunny.swiftmapper.exception;
 
-public class LazyLoadingException extends RuntimeException {
+public class LazyLoadingException extends SwiftORMException {
     public LazyLoadingException(String message) {
         super(message);
     }

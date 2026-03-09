@@ -1,8 +1,7 @@
 package demonstration.model;
 
 import com.rocketbunny.swiftmapper.annotations.entity.*;
-import lombok.Getter;
-import lombok.Setter;
+import lombok.*;
 
 import java.time.LocalDate;
 
@@ -10,17 +9,20 @@ import java.time.LocalDate;
 @Table(name = "passengers")
 @Getter
 @Setter
+@Builder
+@AllArgsConstructor
+@NoArgsConstructor
 public class Passenger {
     @Id
     @GeneratedValue(strategy = Strategy.PATTERN, pattern = "PASSENGER_", startValue = 50000001)
     private String id;
 
     @Column(nullable = false)
-    private String full_name;
+    private String fullName;
 
     @Column(nullable = false)
-    private String passport_number;
+    private String passportNumber;
 
     @Column(nullable = false)
-    private LocalDate birth_date;
+    private LocalDate birthDate;
 }

@@ -3,12 +3,11 @@ package demonstration;
 import com.rocketbunny.swiftmapper.utils.greeting.GreetingManager;
 import demonstration.model.*;
 import demonstration.repostiory.*;
-import com.rocketbunny.swiftmapper.core.ConnectionManager;
+import com.rocketbunny.swiftmapper.core.SwiftMapperContext;
 import com.rocketbunny.swiftmapper.core.Transaction;
 import com.rocketbunny.swiftmapper.core.TransactionTemplate;
 import com.rocketbunny.swiftmapper.criteria.CriteriaBuilder;
-import com.rocketbunny.swiftmapper.repository.SwiftRepository;
-import com.rocketbunny.swiftmapper.repository.query.QueryRepositoryFactory;
+import com.rocketbunny.swiftmapper.monitoring.MetricsCollector;
 
 import java.sql.SQLException;
 import java.time.LocalDate;
@@ -16,10 +15,11 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Random;
 
 public class Demonstration {
 
-    private static ConnectionManager cm;
+    private static SwiftMapperContext context;
     private static AirplaneRepository airplanes;
     private static AirpotsRepository airports;
     private static EmployeeRepository employees;
@@ -47,6 +47,7 @@ public class Demonstration {
             demonstrateSection10Transactions();
             demonstrateSection11ErrorHandling();
             demonstrateSection12AdvancedFeatures();
+            demonstrateSection13Metrics();
 
         } catch (Exception e) {
             System.err.println("❌ CRITICAL ERROR: " + e.getMessage());
@@ -56,10 +57,10 @@ public class Demonstration {
         }
     }
 
-    private static void initialize() throws SQLException {
+    private static void initialize() throws Exception {
         printSubHeader("INITIALIZATION");
 
-        cm = ConnectionManager.fromConfig()
+        context = SwiftMapperContext.fromConfig()
                 .initSchema(
                         Airplane.class,
                         Airport.class,
@@ -70,14 +71,14 @@ public class Demonstration {
                         Ticket.class,
                         Service.class);
 
-        airplanes = QueryRepositoryFactory.create(AirplaneRepository.class, Airplane.class, cm);
-        airports = QueryRepositoryFactory.create(AirpotsRepository.class, Airport.class, cm);
-        employees = QueryRepositoryFactory.create(EmployeeRepository.class, Employee.class, cm);
-        flightCrews = QueryRepositoryFactory.create(FlightCrewRepository.class, FlightCrew.class, cm);
-        flights = QueryRepositoryFactory.create(FlightRepository.class, Flight.class, cm);
-        passengers = QueryRepositoryFactory.create(PassengerRepository.class, Passenger.class, cm);
-        tickets = QueryRepositoryFactory.create(TicketRepository.class, Ticket.class, cm);
-        services = QueryRepositoryFactory.create(ServiceRepository.class, Service.class, cm);
+        airplanes = context.getRepository(AirplaneRepository.class);
+        airports = context.getRepository(AirpotsRepository.class);
+        employees = context.getRepository(EmployeeRepository.class);
+        flightCrews = context.getRepository(FlightCrewRepository.class);
+        flights = context.getRepository(FlightRepository.class);
+        passengers = context.getRepository(PassengerRepository.class);
+        tickets = context.getRepository(TicketRepository.class);
+        services = context.getRepository(ServiceRepository.class);
 
         System.out.println("✓ All repositories initialized\n");
     }
@@ -114,7 +115,7 @@ public class Demonstration {
 
         System.out.println("\n▶ DELETE - Removing entity...");
         String idToDelete = savedAirbus.getId();
-        airplanes.delete(idToDelete);
+        airplanes.deleteById(idToDelete);
         System.out.println("  ✓ Deleted Airbus with ID: " + idToDelete);
         System.out.println("  ✓ Verification - exists: " + airplanes.findById(idToDelete).isPresent());
 
@@ -146,29 +147,29 @@ public class Demonstration {
         System.out.println("\n▶ Column Mapping with snake_case...\n");
 
         Employee captain = new Employee();
-        captain.setFull_name("Ivan Petrovich Barinov");
+        captain.setFullName("Ivan Petrovich Barinov");
         captain.setPosition("Captain");
-        captain.setBirth_date(LocalDate.of(1970, 3, 15));
-        captain.setHire_date(LocalDate.of(2005, 6, 1));
+        captain.setBirthDate(LocalDate.of(1970, 3, 15));
+        captain.setHireDate(LocalDate.of(2005, 6, 1));
         employees.save(captain);
         System.out.println("  ✓ Employee saved with snake_case fields");
 
         Employee coPilot = new Employee();
-        coPilot.setFull_name("Petr Sergeevich Smirnov");
+        coPilot.setFullName("Petr Sergeevich Smirnov");
         coPilot.setPosition("First Officer");
-        coPilot.setBirth_date(LocalDate.of(1985, 8, 22));
-        coPilot.setHire_date(LocalDate.of(2015, 3, 10));
+        coPilot.setBirthDate(LocalDate.of(1985, 8, 22));
+        coPilot.setHireDate(LocalDate.of(2015, 3, 10));
         employees.save(coPilot);
         System.out.println("  ✓ Employee saved with snake_case fields");
 
         System.out.println("\n▶ LocalDate and LocalDateTime Support...\n");
 
         Passenger passenger = new Passenger();
-        passenger.setFull_name("Alexey Grigoriev");
-        passenger.setPassport_number("5018 654076");
-        passenger.setBirth_date(LocalDate.of(1990, 5, 15));
+        passenger.setFullName("Alexey Grigoriev");
+        passenger.setPassportNumber("5018 654076");
+        passenger.setBirthDate(LocalDate.of(1990, 5, 15));
         passengers.save(passenger);
-        System.out.println("  ✓ Passenger with LocalDate: " + passenger.getBirth_date());
+        System.out.println("  ✓ Passenger with LocalDate: " + passenger.getBirthDate());
     }
 
     private static void demonstrateSection3RelationshipTypes() throws SQLException {
@@ -184,33 +185,46 @@ public class Demonstration {
         Employee captain = employees.findByFullName("Ivan Petrovich Barinov").orElseThrow();
         Employee coPilot = employees.findByFullName("Petr Sergeevich Smirnov").orElseThrow();
         crew.setCapitan(captain);
-        crew.setCo_pilot(coPilot);
+        crew.setCoPilot(coPilot);
         flightCrews.save(crew);
         System.out.println("  ✓ FlightCrew created with ManyToOne to Employees");
 
         Flight flight = new Flight();
-        flight.setFlight_number("SU-1234");
+        flight.setFlightNumber("SU-1234");
         flight.setAirplane(plane);
         flight.setCrew(crew);
-        flight.setDeparture_airport(dme);
-        flight.setArrival_airport(ovb);
-        flight.setDeparture_time(LocalDateTime.of(2024, 12, 25, 10, 30));
-        flight.setArrival_time(LocalDateTime.of(2024, 12, 25, 16, 45));
+        flight.setDepartureAirport(dme);
+        flight.setArrivalAirport(ovb);
+        flight.setDepartureTime(LocalDateTime.of(2024, 12, 25, 10, 30));
+        flight.setArrivalTime(LocalDateTime.of(2024, 12, 25, 16, 45));
         flights.save(flight);
         System.out.println("  ✓ Flight created with 4 ManyToOne relationships");
-        System.out.println("    Route: " + flight.getDeparture_airport().getCode() +
-                " → " + flight.getArrival_airport().getCode());
+        System.out.println("    Route: " + flight.getDepartureAirport().getCode() +
+                " → " + flight.getArrivalAirport().getCode());
 
         System.out.println("\n▶ OneToOne - Ticket → Passenger...\n");
 
-        Passenger passenger = passengers.findByFull_Name("Alexey Grigoriev").orElseThrow();
+        Random rnd = new Random();
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 4; i++) {
+            sb.append(rnd.nextInt(10));
+        }
+
+        sb.append(" ").append(String.format("%06d", rnd.nextInt(999999)));
+
+        Passenger passenger = Passenger.builder()
+                .fullName("Passenger" + rnd.nextInt(1) + "")
+                .passportNumber(sb.toString())
+                .birthDate(LocalDate.of(1972, rnd.nextInt(12), rnd.nextInt(28)))
+                .build();
 
         Ticket ticket = new Ticket();
-        ticket.setPassenger(passenger);
+        ticket.setPassenger(passengers.save(passenger));
         ticket.setFlight(flight);
         tickets.save(ticket);
         System.out.println("  ✓ Ticket created with OneToOne to Passenger");
-        System.out.println("    Passenger: " + ticket.getPassenger().getFull_name());
+        System.out.println("    Passenger: " + ticket.getPassenger().getFullName());
     }
 
     private static void demonstrateSection4LazyVsEager() throws SQLException {
@@ -221,23 +235,23 @@ public class Demonstration {
         List<Flight> allFlights = flights.findAll();
         if (!allFlights.isEmpty()) {
             Flight flight = allFlights.get(0);
-            System.out.println("  ✓ Flight loaded: " + flight.getFlight_number());
+            System.out.println("  ✓ Flight loaded: " + flight.getFlightNumber());
             System.out.println("  ✓ Airplane (EAGER): " + flight.getAirplane().getModel());
-            System.out.println("  ✓ Departure Airport (EAGER): " + flight.getDeparture_airport().getName());
-            System.out.println("  ✓ Arrival Airport (EAGER): " + flight.getArrival_airport().getName());
+            System.out.println("  ✓ Departure Airport (EAGER): " + flight.getDepartureAirport().getName());
+            System.out.println("  ✓ Arrival Airport (EAGER): " + flight.getArrivalAirport().getName());
         }
 
         System.out.println("\n▶ LAZY Loading (loaded on first access)...\n");
 
         Optional<Flight> lazyFlight = flights.findByFlightNumber("SU-1234");
         lazyFlight.ifPresent(f -> {
-            System.out.println("  ✓ Flight loaded: " + f.getFlight_number());
+            System.out.println("  ✓ Flight loaded: " + f.getFlightNumber());
             System.out.println("  ⚡ Accessing LAZY-loaded captain (triggers separate query)...");
             Employee captain = f.getCrew().getCapitan();
-            System.out.println("  ✓ Captain (LAZY): " + captain.getFull_name());
+            System.out.println("  ✓ Captain (LAZY): " + captain.getFullName());
             System.out.println("  ⚡ Accessing LAZY-loaded co-pilot...");
-            Employee coPilot = f.getCrew().getCo_pilot();
-            System.out.println("  ✓ Co-pilot (LAZY): " + coPilot.getFull_name());
+            Employee coPilot = f.getCrew().getCoPilot();
+            System.out.println("  ✓ Co-pilot (LAZY): " + coPilot.getFullName());
         });
     }
 
@@ -253,7 +267,7 @@ public class Demonstration {
         System.out.println("  ✓ Found " + boeings.size() + " airplanes with '737' in model");
 
         System.out.println("\n▶ FindBy with nested property...\n");
-        List<Flight> fromDme = flights.findByDeparture_airportCode("DME");
+        List<Flight> fromDme = flights.findByDepartureAirportCode("DME");
         System.out.println("  ✓ Found " + fromDme.size() + " flights from DME");
         if (!fromDme.isEmpty()) {
             System.out.println("  ✓ Flight uses airplane: " + fromDme.get(0).getAirplane().getModel());
@@ -280,8 +294,7 @@ public class Demonstration {
         System.out.println("  Generated SQL: " + query.sql());
         System.out.println("  Parameters: " + query.params());
 
-        SwiftRepository<Airplane, String> airplaneRepo = cm.repository(Airplane.class, String.class);
-        List<Airplane> results = airplaneRepo.query(query.sql(), query.params().toArray());
+        List<Airplane> results = airplanes.query(query.sql(), query.params().toArray());
         System.out.println("  ✓ Found " + results.size() + " airplanes matching criteria");
     }
 
@@ -308,61 +321,109 @@ public class Demonstration {
         services.save(meal);
         System.out.println("  ✓ Service: " + meal.getName() + " ($" + meal.getPrice() + ")");
 
-        System.out.println("\n▶ Attaching Services to Ticket (JoinTable)...\n");
+        System.out.println("\n▶ Attaching Services to EXISTING Ticket (JoinTable)...\n");
 
         List<Ticket> allTickets = tickets.findAll();
-        if (!allTickets.isEmpty()) {
-            Ticket ticket = allTickets.get(0);
-
-            List<Service> ticketServices = new ArrayList<>();
-            ticketServices.add(baggage);
-            ticketServices.add(lounge);
-            ticketServices.add(meal);
-
-            ticket.setServices(ticketServices);
-            tickets.update(ticket);
-            System.out.println("  ✓ Added 3 services to Ticket ID: " + ticket.getId());
-
-            System.out.println("\n▶ Fetching Ticket with Services (EAGER ManyToMany)...\n");
-            Optional<Ticket> reloaded = tickets.findById(ticket.getId());
-            reloaded.ifPresent(t -> {
-                System.out.println("  ✓ Ticket Passenger: " + t.getPassenger().getFull_name());
-                System.out.println("  ✓ Associated Services:");
-                if (t.getServices() != null) {
-                    double total = 0;
-                    for (Service s : t.getServices()) {
-                        System.out.println("    • " + s.getName() + " ($" + s.getPrice() + ")");
-                        total += s.getPrice();
-                    }
-                    System.out.println("  ✓ Total service cost: $" + total);
-                }
-            });
+        if (allTickets.isEmpty()) {
+            System.out.println("  ✗ No tickets found. Skipping ManyToMany demonstration.");
+            return;
         }
+
+        Ticket existingTicket = allTickets.get(0);
+        System.out.println("  ✓ Found existing ticket: " + existingTicket.getId());
+        System.out.println("    Passenger: " + existingTicket.getPassenger().getFullName());
+
+        List<Service> ticketServices = new ArrayList<>();
+        ticketServices.add(baggage);
+        ticketServices.add(lounge);
+        ticketServices.add(meal);
+
+        existingTicket.setServices(ticketServices);
+
+        tickets.update(existingTicket);
+        System.out.println("  ✓ Updated ticket with 3 services");
+
+        System.out.println("\n▶ Fetching Ticket with Services (EAGER ManyToMany)...\n");
+
+        Optional<Ticket> reloaded = tickets.findById(existingTicket.getId());
+        reloaded.ifPresent(t -> {
+            System.out.println("  ✓ Ticket Passenger: " + t.getPassenger().getFullName());
+            System.out.println("  ✓ Flight: " + t.getFlight().getFlightNumber());
+            System.out.println("  ✓ Associated Services:");
+            if (t.getServices() != null && !t.getServices().isEmpty()) {
+                double total = 0;
+                for (Service s : t.getServices()) {
+                    System.out.println("    • " + s.getName() + " ($" + s.getPrice() + ")");
+                    total += s.getPrice();
+                }
+                System.out.println("  ✓ Total service cost: $" + total);
+            } else {
+                System.out.println("    (no services loaded)");
+            }
+        });
+
+        System.out.println("\n▶ Creating NEW Passenger and NEW Ticket...\n");
+
+        Passenger newPassenger = new Passenger();
+        newPassenger.setFullName("Maria Ivanova");
+        newPassenger.setPassportNumber("7502 123456");
+        newPassenger.setBirthDate(LocalDate.of(1992, 7, 20));
+        passengers.save(newPassenger);
+        System.out.println("  ✓ New passenger: " + newPassenger.getFullName());
+
+        List<Flight> allFlights = flights.findAll();
+        if (allFlights.isEmpty()) {
+            System.out.println("  ✗ No flights available");
+            return;
+        }
+        Flight flight = allFlights.get(0);
+
+        Ticket newTicket = new Ticket();
+        newTicket.setPassenger(newPassenger);
+        newTicket.setFlight(flight);
+        newTicket.setServices(List.of(baggage, lounge, meal));
+
+        tickets.save(newTicket);
+        System.out.println("  ✓ Created new ticket: " + newTicket.getId());
     }
 
     private static void demonstrateSection8CascadeOperations() throws SQLException {
         printSection("8. CASCADE OPERATIONS");
 
-        System.out.println("▶ CascadeType.ALL on ManyToMany...\n");
+        System.out.println("▶ CascadeType.ALL on ManyToMany - Adding service to existing ticket...\n");
 
         Service vipService = new Service();
         vipService.setName("VIP Transfer");
         vipService.setPrice(150.00);
+        services.save(vipService);
+        System.out.println("  ✓ New service created: " + vipService.getName());
 
         List<Ticket> allTickets = tickets.findAll();
-        if (!allTickets.isEmpty()) {
-            Ticket ticket = allTickets.get(0);
-
-            List<Service> currentServices = ticket.getServices();
-            if (currentServices == null) {
-                currentServices = new ArrayList<>();
-            }
-            currentServices.add(vipService);
-            ticket.setServices(currentServices);
-
-            tickets.update(ticket);
-            System.out.println("  ✓ Service added with cascade");
+        if (allTickets.isEmpty()) {
+            System.out.println("  ✗ No tickets found");
+            return;
         }
+
+        Ticket ticket = allTickets.size() > 1 ? allTickets.get(1) : allTickets.get(0);
+        System.out.println("  ✓ Found ticket: " + ticket.getId());
+
+        List<Service> currentServices = ticket.getServices();
+        if (currentServices == null) {
+            currentServices = new ArrayList<>();
+        }
+
+        currentServices.add(vipService);
+        ticket.setServices(currentServices);
+
+        tickets.update(ticket);
+        System.out.println("  ✓ Service added with cascade via UPDATE");
+
+        Optional<Ticket> reloaded = tickets.findById(ticket.getId());
+        reloaded.ifPresent(t -> {
+            System.out.println("  ✓ Ticket now has " + t.getServices().size() + " services");
+            double total = t.getServices().stream().mapToDouble(Service::getPrice).sum();
+            System.out.println("  ✓ Total cost: $" + total);
+        });
     }
 
     private static void demonstrateSection9BatchOperations() throws SQLException {
@@ -373,30 +434,33 @@ public class Demonstration {
         List<Passenger> batchPassengers = new ArrayList<>();
         for (int i = 1; i <= 5; i++) {
             Passenger p = new Passenger();
-            p.setFull_name("Passenger " + i);
-            p.setPassport_number("PASS" + String.format("%04d", i));
-            p.setBirth_date(LocalDate.of(1980 + i, i, i));
+            p.setFullName("Batch Passenger " + i);
+            p.setPassportNumber("BATCH" + String.format("%04d", i));
+            p.setBirthDate(LocalDate.of(1980 + i, i, i));
             batchPassengers.add(p);
         }
 
-        SwiftRepository<Passenger, String> passengerRepo = cm.repository(Passenger.class, String.class);
-        List<Passenger> saved = passengerRepo.saveAll(batchPassengers);
+        List<Passenger> saved = passengers.saveAll(batchPassengers);
         System.out.println("  ✓ Batch saved " + saved.size() + " passengers");
 
         System.out.println("\n▶ Batch update (updateAll)...\n");
 
         for (Passenger p : saved) {
-            p.setFull_name(p.getFull_name() + " (Updated)");
+            p.setFullName(p.getFullName() + " (Batch Updated)");
         }
-        passengerRepo.updateAll(saved);
+
+        passengers.updateAll(saved);
         System.out.println("  ✓ Batch updated " + saved.size() + " passengers");
 
-        System.out.println("\n▶ Batch delete (deleteAll)...\n");
+        Passenger check = passengers.findById(saved.get(0).getId()).orElseThrow();
+        System.out.println("  ✓ Verified: " + check.getFullName());
+
+        System.out.println("\n▶ Batch delete (deleteAllById)...\n");
 
         List<String> idsToDelete = new ArrayList<>();
         idsToDelete.add(saved.get(0).getId());
         idsToDelete.add(saved.get(1).getId());
-        passengerRepo.deleteAll(idsToDelete);
+        passengers.deleteAllById(idsToDelete);
         System.out.println("  ✓ Batch deleted 2 passengers");
     }
 
@@ -405,7 +469,7 @@ public class Demonstration {
 
         System.out.println("▶ Manual Transaction (begin/commit)...\n");
 
-        Transaction tx = new Transaction(cm);
+        Transaction tx = new Transaction(context.getConnectionManager());
         try {
             tx.begin();
 
@@ -415,16 +479,14 @@ public class Demonstration {
             plane.setPassCapacity(114);
             plane.setNumber("RF-EMB-001");
 
-            SwiftRepository<Airplane, String> airplaneRepo = cm.repository(Airplane.class, String.class);
-            airplaneRepo.save(plane);
+            airplanes.save(plane);
 
             Airport airport = new Airport();
             airport.setName("Pulkovo");
             airport.setCode("LED");
             airport.setCity("Saint Petersburg");
 
-            SwiftRepository<Airport, String> airportRepo = cm.repository(Airport.class, String.class);
-            airportRepo.save(airport);
+            airports.save(airport);
 
             tx.commit();
             System.out.println("  ✓ Transaction committed");
@@ -438,16 +500,15 @@ public class Demonstration {
 
         System.out.println("\n▶ TransactionTemplate (functional style)...\n");
 
-        TransactionTemplate template = new TransactionTemplate(cm);
+        TransactionTemplate template = new TransactionTemplate(context.getConnectionManager());
 
         String result = template.execute(conn -> {
-            SwiftRepository<Airplane, String> repo = cm.repository(Airplane.class, String.class);
             Airplane plane = new Airplane();
             plane.setManufacturer("Bombardier");
             plane.setModel("CRJ900");
             plane.setPassCapacity(90);
             plane.setNumber("RF-BMB-001");
-            repo.save(plane);
+            airplanes.save(plane);
             return plane.getId();
         });
 
@@ -455,7 +516,7 @@ public class Demonstration {
 
         System.out.println("\n▶ Transaction with Rollback on Error...\n");
 
-        Transaction tx2 = new Transaction(cm);
+        Transaction tx2 = new Transaction(context.getConnectionManager());
         int countBefore = flights.findAll().size();
         System.out.println("  Flights before: " + countBefore);
 
@@ -463,11 +524,11 @@ public class Demonstration {
             tx2.begin();
 
             Flight testFlight = new Flight();
-            testFlight.setFlight_number("TEST-ROLLBACK");
+            testFlight.setFlightNumber("TEST-ROLLBACK");
             testFlight.setAirplane(airplanes.findAll().get(0));
             testFlight.setCrew(flightCrews.findAll().get(0));
-            testFlight.setDeparture_airport(airports.findByCode("DME").orElseThrow());
-            testFlight.setArrival_airport(airports.findByCode("OVB").orElseThrow());
+            testFlight.setDepartureAirport(airports.findByCode("DME").orElseThrow());
+            testFlight.setArrivalAirport(airports.findByCode("OVB").orElseThrow());
             flights.save(testFlight);
 
             throw new RuntimeException("Simulated error!");
@@ -515,8 +576,7 @@ public class Demonstration {
 
         System.out.println("▶ Custom Query with SQL...\n");
 
-        SwiftRepository<Airplane, String> airplaneRepo = cm.repository(Airplane.class, String.class);
-        List<Airplane> customResults = airplaneRepo.query(
+        List<Airplane> customResults = airplanes.query(
                 "SELECT * FROM airplanes WHERE manufacturer = ? AND pass_capacity > ?",
                 "Boeing", 100);
         System.out.println("  ✓ Custom query returned " + customResults.size() + " results");
@@ -535,30 +595,55 @@ public class Demonstration {
         List<Ticket> allTickets = tickets.findAll();
         System.out.println("  Total tickets in database: " + allTickets.size());
 
-        System.out.println("\n▶ Final Summary...\n");
+        System.out.println("\n▶ Query Cache Demonstration...\n");
+
+        long start1 = System.currentTimeMillis();
+        List<Airplane> firstQuery = airplanes.findAll();
+        long time1 = System.currentTimeMillis() - start1;
+        System.out.println("  First query: " + firstQuery.size() + " results in " + time1 + "ms (cache miss)");
+
+        long start2 = System.currentTimeMillis();
+        List<Airplane> secondQuery = airplanes.findAll();
+        long time2 = System.currentTimeMillis() - start2;
+        System.out.println("  Second query: " + secondQuery.size() + " results in " + time2 + "ms (cache hit)");
+    }
+
+    private static void demonstrateSection13Metrics() {
+        printSection("13. METRICS & MONITORING");
+
+        System.out.println("▶ Collecting Performance Metrics...\n");
+
+        MetricsCollector metrics = MetricsCollector.getInstance();
+        var snapshot = metrics.getSnapshot();
+
         System.out.println("  ┌─────────────────────────────────────────┐");
-        System.out.println("  │  SWIFTMAPPER DEMONSTRATION COMPLETE     │");
+        System.out.println("  │  PERFORMANCE METRICS                    │");
         System.out.println("  ├─────────────────────────────────────────┤");
-        System.out.println("  │  ✓ CRUD Operations                      │");
-        System.out.println("  │  ✓ Entity Mappings                      │");
-        System.out.println("  │  ✓ ManyToOne (EAGER & LAZY)             │");
-        System.out.println("  │  ✓ OneToOne                             │");
-        System.out.println("  │  ✓ ManyToMany                           │");
-        System.out.println("  │  ✓ Query Methods                        │");
-        System.out.println("  │  ✓ Criteria Builder                     │");
-        System.out.println("  │  ✓ Lazy vs Eager Loading                │");
-        System.out.println("  │  ✓ Cascade Operations                   │");
-        System.out.println("  │  ✓ Batch Operations                     │");
-        System.out.println("  │  ✓ Transaction Management               │");
-        System.out.println("  │  ✓ Error Handling                       │");
+        System.out.printf("  │  Total Queries:     %-20d │%n", snapshot.totalQueries());
+        System.out.printf("  │  Total Errors:      %-20d │%n", snapshot.totalErrors());
+        System.out.printf("  │  Error Rate:        %-19.2f%% │%n", snapshot.overallErrorRate() * 100);
+        System.out.printf("  │  Uptime:            %-20s │%n", snapshot.uptime().getSeconds() + "s");
+        System.out.println("  ├──────────────────────────────────────────┤");
+
+        if (!snapshot.operations().isEmpty()) {
+            System.out.println("  │  Operation Breakdown:                   │");
+            snapshot.operations().forEach((name, stats) -> {
+                System.out.printf("  │    %-15s: %-5d ops, %-3dms avg%n",
+                        name, stats.count(), stats.avgTimeMs());
+            });
+        }
+
         System.out.println("  └─────────────────────────────────────────┘");
+
+        metrics.reset();
+        System.out.println("\n  ✓ Metrics collected and reset");
     }
 
     private static void cleanup() {
         printSubHeader("CLEANUP");
-        if (cm != null) {
+        if (context != null) {
             System.out.println("🔌 Closing connection pool...");
-            cm.close();
+            context.close();
             System.out.println("✓ Connection pool closed\n");
         }
     }

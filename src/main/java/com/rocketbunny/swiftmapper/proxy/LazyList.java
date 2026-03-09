@@ -1,6 +1,7 @@
 package com.rocketbunny.swiftmapper.proxy;
 
 import com.rocketbunny.swiftmapper.exception.LazyLoadingException;
+import lombok.Getter;
 
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -12,6 +13,7 @@ import java.util.stream.Stream;
 public class LazyList<E> implements List<E> {
     private volatile List<E> delegate;
     private final Runnable loader;
+    @Getter
     private volatile boolean loaded = false;
     private final Object initializationLock = new Object();
 
@@ -30,7 +32,6 @@ public class LazyList<E> implements List<E> {
                 return;
             }
 
-            List<E> loadedData = new ArrayList<>();
             try {
                 loader.run();
             } catch (Exception e) {
@@ -39,14 +40,6 @@ public class LazyList<E> implements List<E> {
 
             loaded = true;
         }
-    }
-
-    public boolean isLoaded() {
-        return loaded;
-    }
-
-    void internalSetDelegate(List<E> delegate) {
-        this.delegate = delegate != null ? new CopyOnWriteArrayList<>(delegate) : new CopyOnWriteArrayList<>();
     }
 
     @Override

@@ -18,7 +18,7 @@ public class Flight {
     @GeneratedValue(strategy = Strategy.PATTERN, pattern = "FLIGHT_", startValue = 10000001)
     private String id;
 
-    private String flight_number;
+    private String flightNumber;
 
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "airplane_id", nullable = false)
@@ -30,13 +30,13 @@ public class Flight {
 
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "departure_airport_id", nullable = false)
-    private Airport departure_airport;
+    private Airport departureAirport;
 
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "arrival_airport_id", nullable = false)
-    private Airport arrival_airport;
+    private Airport arrivalAirport;
 
-    private LocalDateTime departure_time;
+    private LocalDateTime departureTime;
 
-    private LocalDateTime arrival_time;
+    private LocalDateTime arrivalTime;
 }

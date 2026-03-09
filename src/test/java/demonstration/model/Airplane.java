@@ -27,6 +27,7 @@ public class Airplane {
 
     @Override
     public String toString() {
-        return "Airplane [ID:" + id + " | " + manufacturer + " " + model + " | " + PassCapacity + ". NUMBER: " + number + "]";
+        return "Airplane [ID = " + id + " | " + manufacturer + " " + model + " | " + PassCapacity
+                + ". NUMBER: " + number + "]";
     }
 }

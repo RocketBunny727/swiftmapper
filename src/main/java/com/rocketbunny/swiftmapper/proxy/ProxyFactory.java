@@ -94,11 +94,12 @@ public class ProxyFactory {
             if (state == State.UNINITIALIZED) {
                 if (STATE_UPDATER.compareAndSet(this, State.UNINITIALIZED, State.LOADING)) {
                     try {
-                        loadedEntity = loader.call();
-                        state = State.LOADED;
+                        Object loaded = loader.call();
+                        loadedEntity = loaded;
+                        STATE_UPDATER.set(this, State.LOADED);
                         log.debug("Lazy loading completed for {}.{}", entityClass.getSimpleName(), methodName);
                     } catch (Exception e) {
-                        state = State.FAILED;
+                        STATE_UPDATER.set(this, State.FAILED);
                         log.error("Lazy loading failed for {}.{}", e, entityClass.getSimpleName(), methodName);
                         throw new LazyLoadingException("Failed to load lazy entity " + entityClass.getSimpleName(), e);
                     }

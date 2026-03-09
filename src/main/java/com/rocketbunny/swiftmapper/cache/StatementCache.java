@@ -2,53 +2,58 @@ package com.rocketbunny.swiftmapper.cache;
 
 import com.rocketbunny.swiftmapper.utils.logger.SwiftLogger;
 
-import java.lang.ref.Cleaner;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class StatementCache {
     private final Map<ConnectionKey, Map<String, PreparedStatement>> cache = new ConcurrentHashMap<>();
     private final SwiftLogger log = SwiftLogger.getLogger(StatementCache.class);
     private final int maxStatementsPerConnection;
-    private final Cleaner cleaner = Cleaner.create();
+    private final ReentrantReadWriteLock globalLock = new ReentrantReadWriteLock();
 
     public StatementCache(int maxStatementsPerConnection) {
         this.maxStatementsPerConnection = maxStatementsPerConnection;
     }
 
     public PreparedStatement getStatement(Connection connection, String sql) throws SQLException {
-        cleanupStaleEntries();
+        globalLock.readLock().lock();
+        try {
+            ConnectionKey key = findOrCreateKey(connection);
 
-        ConnectionKey key = findOrCreateKey(connection);
+            Map<String, PreparedStatement> connCache = cache.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
 
-        Map<String, PreparedStatement> connCache = cache.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
+            synchronized (connCache) {
+                PreparedStatement stmt = connCache.get(sql);
 
-        PreparedStatement stmt = connCache.get(sql);
-
-        if (stmt != null) {
-            try {
-                if (!stmt.isClosed() && stmt.getConnection() == connection) {
-                    log.debug("Cache hit for SQL: {}", sql);
-                    return stmt;
+                if (stmt != null) {
+                    try {
+                        if (!stmt.isClosed() && stmt.getConnection() == connection) {
+                            log.debug("Cache hit for SQL: {}", sql);
+                            return stmt;
+                        }
+                    } catch (SQLException e) {
+                        log.warn("Stale statement in cache, removing");
+                    }
+                    connCache.remove(sql);
                 }
-            } catch (SQLException e) {
-                log.warn("Stale statement in cache, removing");
+
+                if (connCache.size() >= maxStatementsPerConnection) {
+                    evictOldestStatement(connCache);
+                }
+
+                stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+                connCache.put(sql, stmt);
+                log.debug("Cached new statement for SQL: {}", sql);
+                return stmt;
             }
-            connCache.remove(sql);
+        } finally {
+            globalLock.readLock().unlock();
         }
-
-        if (connCache.size() >= maxStatementsPerConnection) {
-            evictOldestStatement(connCache);
-        }
-
-        stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-        connCache.put(sql, stmt);
-        log.debug("Cached new statement for SQL: {}", sql);
-        return stmt;
     }
 
     private ConnectionKey findOrCreateKey(Connection connection) {
@@ -72,15 +77,20 @@ public class StatementCache {
         }
     }
 
-    private void cleanupStaleEntries() {
-        cache.entrySet().removeIf(entry -> {
-            ConnectionKey key = entry.getKey();
-            if (key.connection == null || isClosed(key.connection)) {
-                closeAllStatements(entry.getValue());
-                return true;
-            }
-            return false;
-        });
+    public void cleanupStaleEntries() {
+        globalLock.writeLock().lock();
+        try {
+            cache.entrySet().removeIf(entry -> {
+                ConnectionKey key = entry.getKey();
+                if (key.connection == null || isClosed(key.connection)) {
+                    closeAllStatements(entry.getValue());
+                    return true;
+                }
+                return false;
+            });
+        } finally {
+            globalLock.writeLock().unlock();
+        }
     }
 
     private boolean isClosed(Connection connection) {
@@ -102,28 +112,33 @@ public class StatementCache {
     }
 
     public void clearForConnection(Connection connection) {
-        cache.entrySet().removeIf(entry -> {
-            if (entry.getKey().connection == connection) {
-                closeAllStatements(entry.getValue());
-                return true;
-            }
-            return false;
-        });
+        globalLock.writeLock().lock();
+        try {
+            cache.entrySet().removeIf(entry -> {
+                if (entry.getKey().connection == connection) {
+                    closeAllStatements(entry.getValue());
+                    return true;
+                }
+                return false;
+            });
+        } finally {
+            globalLock.writeLock().unlock();
+        }
     }
 
     public void clear() {
-        for (Map<String, PreparedStatement> connCache : cache.values()) {
-            closeAllStatements(connCache);
+        globalLock.writeLock().lock();
+        try {
+            for (Map<String, PreparedStatement> connCache : cache.values()) {
+                closeAllStatements(connCache);
+            }
+            cache.clear();
+        } finally {
+            globalLock.writeLock().unlock();
         }
-        cache.clear();
     }
 
-    private static class ConnectionKey {
-        final Connection connection;
-
-        ConnectionKey(Connection connection) {
-            this.connection = connection;
-        }
+    private record ConnectionKey(Connection connection) {
 
         @Override
         public boolean equals(Object o) {

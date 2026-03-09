@@ -1,5 +1,6 @@
 package com.rocketbunny.swiftmapper.criteria;
 
+import com.rocketbunny.swiftmapper.criteria.model.BuiltQuery;
 import com.rocketbunny.swiftmapper.criteria.model.CriteriaQuery;
 import com.rocketbunny.swiftmapper.utils.naming.NamingStrategy;
 
@@ -13,6 +14,7 @@ public class CriteriaBuilder<T> {
     private final List<Order> orders = new ArrayList<>();
     private Integer limit;
     private Integer offset;
+    private final SQLQueryBuilder sqlBuilder;
 
     private static final Set<String> SQL_KEYWORDS = Set.of(
             "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TABLE",
@@ -25,6 +27,7 @@ public class CriteriaBuilder<T> {
 
     public CriteriaBuilder(Class<T> entityClass) {
         this.entityClass = entityClass;
+        this.sqlBuilder = new SQLQueryBuilder();
     }
 
     private String validateAndEscapeProperty(String property) {
@@ -144,7 +147,71 @@ public class CriteriaBuilder<T> {
         return this;
     }
 
+    public CriteriaBuilder<T> page(int pageNumber, int pageSize) {
+        if (pageNumber < 1) {
+            throw new IllegalArgumentException("Page number must be >= 1");
+        }
+        if (pageSize < 1) {
+            throw new IllegalArgumentException("Page size must be >= 1");
+        }
+        this.limit = pageSize;
+        this.offset = (pageNumber - 1) * pageSize;
+        return this;
+    }
+
+    public List<T> query(java.util.function.BiFunction<String, List<Object>, List<T>> queryFunction) {
+        CriteriaQuery<T> cq = build();
+        return queryFunction.apply(cq.sql(), cq.params());
+    }
+
     public CriteriaQuery<T> build() {
+        sqlBuilder.from(entityClass);
+        sqlBuilder.selectAll();
+
+        for (Criterion c : criteria) {
+            addCriterionToSqlBuilder(c);
+        }
+
+        for (Order o : orders) {
+            sqlBuilder.orderBy(o.property().replace("\"", ""), o.direction());
+        }
+
+        if (limit != null) {
+            sqlBuilder.limit(limit);
+        }
+        if (offset != null) {
+            sqlBuilder.offset(offset);
+        }
+
+        BuiltQuery built = sqlBuilder.build();
+
+        return new CriteriaQuery<>(built.getSql(), built.getParams());
+    }
+
+    public CriteriaQuery<T> buildCount() {
+        sqlBuilder.from(entityClass);
+        BuiltQuery built = sqlBuilder.buildCount();
+        return new CriteriaQuery<>(built.getSql(), built.getParams());
+    }
+
+    private void addCriterionToSqlBuilder(Criterion c) {
+        String prop = c.property().replace("\"", "");
+
+        switch (c.operator()) {
+            case "=" -> sqlBuilder.where(prop, c.value());
+            case "<>" -> sqlBuilder.where(prop, "<>", c.value());
+            case ">" -> sqlBuilder.where(prop, ">", c.value());
+            case "<" -> sqlBuilder.where(prop, "<", c.value());
+            case ">=" -> sqlBuilder.where(prop, ">=", c.value());
+            case "<=" -> sqlBuilder.where(prop, "<=", c.value());
+            case "LIKE" -> sqlBuilder.like(prop, (String) c.value());
+            case "IN" -> sqlBuilder.in(prop, (List<?>) c.value());
+            case "IS NULL" -> sqlBuilder.isNull(prop);
+            case "IS NOT NULL" -> sqlBuilder.isNotNull(prop);
+        }
+    }
+
+    public CriteriaQuery<T> buildLegacy() {
         String tableName = NamingStrategy.getTableName(entityClass);
         String escapedTableName = escapeIdentifier(tableName);
         StringBuilder sql = new StringBuilder("SELECT * FROM ").append(escapedTableName);

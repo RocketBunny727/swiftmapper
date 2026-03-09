@@ -1,6 +1,6 @@
 package com.rocketbunny.swiftmapper.exception;
 
-public class ProxyCreationException extends RuntimeException {
+public class ProxyCreationException extends SwiftORMException {
     public ProxyCreationException(String message) {
         super(message);
     }

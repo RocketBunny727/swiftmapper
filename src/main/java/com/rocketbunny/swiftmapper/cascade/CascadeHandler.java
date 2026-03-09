@@ -9,6 +9,7 @@ import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
 
@@ -16,6 +17,7 @@ public class CascadeHandler {
     private final Connection connection;
     private final boolean externalTransaction;
     private final SwiftLogger log = SwiftLogger.getLogger(CascadeHandler.class);
+    private final Set<Object> processingEntities = Collections.newSetFromMap(new IdentityHashMap<>());
 
     public CascadeHandler(Connection connection) {
         this.connection = connection;
@@ -47,34 +49,49 @@ public class CascadeHandler {
     }
 
     private void processCascades(Object entity, CascadeType action, Set<Object> visited, Boolean isPre) throws Exception {
-        for (Field field : getAllFields(entity.getClass())) {
-            field.setAccessible(true);
+        if (entity == null) return;
 
-            if (isPre != null) {
-                boolean isManyToOne = field.isAnnotationPresent(ManyToOne.class);
-                boolean isOneToOne = field.isAnnotationPresent(OneToOne.class);
-                boolean isOneToMany = field.isAnnotationPresent(OneToMany.class);
-                boolean isManyToMany = field.isAnnotationPresent(ManyToMany.class);
-
-                if (isPre && !(isManyToOne || isOneToOne)) continue;
-                if (!isPre && !(isOneToMany || isManyToMany)) continue;
+        synchronized (processingEntities) {
+            if (processingEntities.contains(entity)) {
+                return;
             }
+            processingEntities.add(entity);
+        }
 
-            CascadeType[] cascades = getCascadeTypes(field);
+        try {
+            for (Field field : getAllFields(entity.getClass())) {
+                field.setAccessible(true);
 
-            if (cascades != null && shouldCascade(cascades, action)) {
-                Object related = field.get(entity);
-                if (related != null) {
-                    if (related instanceof Collection<?> collection) {
-                        for (Object item : collection) {
-                            if (item != null) {
-                                executeAction(item, action, visited);
+                if (isPre != null) {
+                    boolean isManyToOne = field.isAnnotationPresent(ManyToOne.class);
+                    boolean isOneToOne = field.isAnnotationPresent(OneToOne.class);
+                    boolean isOneToMany = field.isAnnotationPresent(OneToMany.class);
+                    boolean isManyToMany = field.isAnnotationPresent(ManyToMany.class);
+
+                    if (isPre && !(isManyToOne || isOneToOne)) continue;
+                    if (!isPre && !(isOneToMany || isManyToMany)) continue;
+                }
+
+                CascadeType[] cascades = getCascadeTypes(field);
+
+                if (cascades != null && shouldCascade(cascades, action)) {
+                    Object related = field.get(entity);
+                    if (related != null) {
+                        if (related instanceof Collection<?> collection) {
+                            for (Object item : collection) {
+                                if (item != null) {
+                                    executeAction(item, action, visited);
+                                }
                             }
+                        } else {
+                            executeAction(related, action, visited);
                         }
-                    } else {
-                        executeAction(related, action, visited);
                     }
                 }
+            }
+        } finally {
+            synchronized (processingEntities) {
+                processingEntities.remove(entity);
             }
         }
     }
@@ -112,9 +129,11 @@ public class CascadeHandler {
             return;
         }
 
+        visited.add(relatedEntity);
+
         Class clazz = relatedEntity.getClass();
         Session session = new Session(connection, clazz);
-        session.setExternalTransaction(externalTransaction);
+        session.setExternalTransaction(true);
 
         try {
             switch (action) {

@@ -8,7 +8,7 @@ import java.util.Optional;
 
 public interface FlightRepository extends Repository<Flight, String> {
     Optional<Flight> findByFlightNumber(String flight_number);
-    List<Flight> findByDeparture_airportCode(String code);
-    List<Flight> findByArrival_airportCode(String code);
+    List<Flight> findByDepartureAirportCode(String code);
+    List<Flight> findByArrivalAirportCode(String code);
     List<Flight> findByAirplaneManufacturer(String manufacturer);
 }

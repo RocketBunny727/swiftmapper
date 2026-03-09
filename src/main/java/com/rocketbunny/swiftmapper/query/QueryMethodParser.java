@@ -6,7 +6,9 @@ import com.rocketbunny.swiftmapper.annotations.entity.Table;
 import com.rocketbunny.swiftmapper.annotations.relationship.JoinColumn;
 import com.rocketbunny.swiftmapper.core.EntityMapper;
 import com.rocketbunny.swiftmapper.query.model.*;
+import com.rocketbunny.swiftmapper.utils.converters.CamelToSnakeConverter;
 import com.rocketbunny.swiftmapper.utils.logger.SwiftLogger;
+import com.rocketbunny.swiftmapper.utils.naming.NamingStrategy;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -145,9 +147,6 @@ public class QueryMethodParser {
         if (identifier == null) {
             return null;
         }
-        if (!identifier.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
-            throw new SecurityException("Invalid SQL identifier: " + identifier);
-        }
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
@@ -175,22 +174,12 @@ public class QueryMethodParser {
                 sql.append(" AND ");
             }
 
-            NestedField nested = parseNestedField(token);
+            NestedField nested = parseNestedField(token, joins);
             String columnName;
             PropertyCondition propCond;
 
             if (nested != null) {
-                String alias = "t" + (joins.size() + 1);
-                String tableName = getTableName(nested.entityClass());
-
-                JoinInfo existingJoin = findExistingJoin(joins, nested.foreignKey());
-                if (existingJoin == null) {
-                    joins.add(new JoinInfo(tableName, nested.foreignKey(), nested.primaryKey()));
-                    alias = "t" + joins.size();
-                } else {
-                    alias = "t" + (joins.indexOf(existingJoin) + 1);
-                }
-
+                String alias = "t" + nested.joinIndex();
                 propCond = parsePropertyCondition(nested.propertyCondition());
                 columnName = alias + "." + escapeIdentifier(getActualColumnName(nested.entityClass(), nested.propertyName()));
             } else {
@@ -210,23 +199,15 @@ public class QueryMethodParser {
     private String getActualColumnName(Class<?> entityClass, String propertyName) {
         validatePropertyName(propertyName);
 
-        String searchName = propertyName.toLowerCase();
+        String searchName = CamelToSnakeConverter.convert(propertyName).toLowerCase();
 
         List<Field> allFields = getAllFields(entityClass);
         for (Field field : allFields) {
             String fieldName = field.getName();
-            String normalizedFieldName = fieldName.toLowerCase().replace("_", "");
-            String normalizedSearchName = searchName.replace("_", "");
+            String normalizedFieldName = CamelToSnakeConverter.convert(fieldName).toLowerCase();
 
-            if (normalizedFieldName.equals(normalizedSearchName) || fieldName.equalsIgnoreCase(propertyName)) {
-                if (field.isAnnotationPresent(Column.class)) {
-                    String colName = field.getAnnotation(Column.class).name();
-                    if (colName != null && !colName.isEmpty()) {
-                        validateColumnName(colName);
-                        return colName;
-                    }
-                }
-                return fieldName;
+            if (normalizedFieldName.equals(searchName)) {
+                return NamingStrategy.getColumnName(field);
             }
         }
 
@@ -260,25 +241,9 @@ public class QueryMethodParser {
         }
     }
 
-    private void validateColumnName(String columnName) {
-        if (columnName == null || columnName.isEmpty()) {
-            throw new IllegalArgumentException("Column name cannot be null or empty");
-        }
-        if (columnName.length() > 64) {
-            throw new IllegalArgumentException("Column name too long: " + columnName);
-        }
-
-        if (!columnName.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
-            throw new SecurityException("Invalid column name format (SQL injection prevention): " + columnName);
-        }
-
-        if (SQL_KEYWORDS.contains(columnName.toUpperCase())) {
-            throw new SecurityException("Column name cannot be a reserved SQL keyword: " + columnName);
-        }
-    }
-
     private JoinInfo findExistingJoin(List<JoinInfo> joins, String foreignKey) {
-        for (JoinInfo join : joins) {
+        for (int i = 0; i < joins.size(); i++) {
+            JoinInfo join = joins.get(i);
             if (join.foreignKey().equals(foreignKey)) {
                 return join;
             }
@@ -292,7 +257,7 @@ public class QueryMethodParser {
         if (table != null && !table.name().isEmpty()) {
             tableName = table.name();
         } else {
-            tableName = entityClass.getSimpleName().toLowerCase();
+            tableName = CamelToSnakeConverter.convert(entityClass.getSimpleName()).toLowerCase();
         }
         validateTableName(tableName);
         return tableName;
@@ -361,8 +326,9 @@ public class QueryMethodParser {
         return paramsNeeded;
     }
 
-    private NestedField parseNestedField(String token) {
-        for (Map.Entry<String, com.rocketbunny.swiftmapper.annotations.relationship.RelationshipField> entry : mapper.getRelationshipFields().entrySet()) {
+    private NestedField parseNestedField(String token, List<JoinInfo> joins) {
+        for (Map.Entry<String, com.rocketbunny.swiftmapper.annotations.relationship.RelationshipField> entry
+                : mapper.getRelationshipFields().entrySet()) {
             String fieldName = entry.getKey();
             var relField = entry.getValue();
 
@@ -374,38 +340,34 @@ public class QueryMethodParser {
                 Class<?> targetClass = getTargetClass(relField.field());
                 String propertyCondition = remainder;
 
-                String fkColumn = fieldName.toLowerCase() + "_id";
-                var joinColumn = relField.field().getAnnotation(JoinColumn.class);
-                if (joinColumn != null && !joinColumn.name().isEmpty()) {
-                    fkColumn = joinColumn.name();
-                    validateColumnName(fkColumn);
-                }
+                String fkColumn = NamingStrategy.getForeignKeyColumn(relField.field());
 
-                String pkColumn = "id";
-                try {
-                    List<Field> fields = getAllFields(targetClass);
-                    for (Field f : fields) {
-                        if (f.isAnnotationPresent(Id.class)) {
-                            pkColumn = f.getName();
-                            if (f.isAnnotationPresent(Column.class)) {
-                                String colName = f.getAnnotation(Column.class).name();
-                                if (colName != null && !colName.isEmpty()) {
-                                    validateColumnName(colName);
-                                    pkColumn = colName;
-                                }
-                            }
-                            break;
-                        }
-                    }
-                } catch (Exception e) {
-                    log.warn("Could not determine PK column: {}", e.getMessage());
+                String pkColumn = getIdColumnName(targetClass);
+
+                JoinInfo existingJoin = findExistingJoin(joins, fkColumn);
+                int joinIndex;
+                if (existingJoin == null) {
+                    joins.add(new JoinInfo(getTableName(targetClass), fkColumn, pkColumn));
+                    joinIndex = joins.size();
+                } else {
+                    joinIndex = joins.indexOf(existingJoin) + 1;
                 }
 
                 return new NestedField(targetClass, fkColumn, pkColumn,
-                        propertyCondition, extractPropertyName(propertyCondition));
+                        propertyCondition, extractPropertyName(propertyCondition), joinIndex);
             }
         }
         return null;
+    }
+
+    private String getIdColumnName(Class<?> entityClass) {
+        List<Field> fields = getAllFields(entityClass);
+        for (Field f : fields) {
+            if (f.isAnnotationPresent(Id.class)) {
+                return NamingStrategy.getIdColumnName(f);
+            }
+        }
+        return "id";
     }
 
     private String extractPropertyName(String condition) {
