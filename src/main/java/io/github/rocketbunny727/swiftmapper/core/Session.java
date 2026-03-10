@@ -6,6 +6,7 @@ import io.github.rocketbunny727.swiftmapper.cache.QueryCache;
 import io.github.rocketbunny727.swiftmapper.cache.StatementCache;
 import io.github.rocketbunny727.swiftmapper.cascade.CascadeHandler;
 import io.github.rocketbunny727.swiftmapper.config.ConfigReader;
+import io.github.rocketbunny727.swiftmapper.exception.EntityNotFoundException;
 import io.github.rocketbunny727.swiftmapper.exception.MappingException;
 import io.github.rocketbunny727.swiftmapper.exception.QueryException;
 import io.github.rocketbunny727.swiftmapper.exception.ValidationException;
@@ -1315,7 +1316,7 @@ public class Session<T> {
             queryLogger.logQueryEnd(logEntry, rows, null);
 
             if (rows == 0) {
-                throw new QueryException("Entity not found for delete", null);
+                throw new EntityNotFoundException("Entity with given ID not found for deletion");
             }
         } catch (SQLException e) {
             queryLogger.logQueryEnd(logEntry, 0, e);
