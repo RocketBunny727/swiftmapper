@@ -1,0 +1,3 @@
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+  io.github.rocketbunny727.swiftmapper.autoconfigure.SwiftMapperAutoConfiguration,\
+  io.github.rocketbunny727.swiftmapper.autoconfigure.SwiftTransactionalAutoConfiguration

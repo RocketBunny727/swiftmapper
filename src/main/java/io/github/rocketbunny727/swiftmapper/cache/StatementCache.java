@@ -6,6 +6,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -21,50 +22,61 @@ public class StatementCache {
     }
 
     public PreparedStatement getStatement(Connection connection, String sql) throws SQLException {
-        globalLock.readLock().lock();
-        try {
-            ConnectionKey key = findOrCreateKey(connection);
+        ConnectionKey key = findOrCreateKey(connection);
+        Map<String, PreparedStatement> connCache =
+                cache.computeIfAbsent(key, k -> new LinkedHashMap<>());
 
-            Map<String, PreparedStatement> connCache = cache.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
+        synchronized (connCache) {
+            PreparedStatement stmt = connCache.get(sql);
 
-            synchronized (connCache) {
-                PreparedStatement stmt = connCache.get(sql);
-
-                if (stmt != null) {
-                    try {
-                        if (!stmt.isClosed() && stmt.getConnection() == connection) {
-                            log.debug("Cache hit for SQL: {}", sql);
-                            return stmt;
-                        }
-                    } catch (SQLException e) {
-                        log.warn("Stale statement in cache, removing");
+            if (stmt != null) {
+                try {
+                    if (!stmt.isClosed() && stmt.getConnection() == connection) {
+                        log.debug("Cache hit for SQL: {}", sql);
+                        return stmt;
                     }
-                    connCache.remove(sql);
+                } catch (SQLException e) {
+                    log.warn("Stale statement in cache, removing");
                 }
-
-                if (connCache.size() >= maxStatementsPerConnection) {
-                    evictOldestStatement(connCache);
-                }
-
-                stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-                connCache.put(sql, stmt);
-                log.debug("Cached new statement for SQL: {}", sql);
-                return stmt;
+                connCache.remove(sql);
             }
-        } finally {
-            globalLock.readLock().unlock();
+
+            if (connCache.size() >= maxStatementsPerConnection) {
+                evictOldestStatement(connCache);
+            }
+
+            stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+            connCache.put(sql, stmt);
+            log.debug("Cached new statement for SQL: {}", sql);
+            return stmt;
         }
     }
 
     private ConnectionKey findOrCreateKey(Connection connection) {
-        for (ConnectionKey key : cache.keySet()) {
-            if (key.connection == connection) {
-                return key;
+        globalLock.readLock().lock();
+        try {
+            for (ConnectionKey key : cache.keySet()) {
+                if (key.connection == connection) {
+                    return key;
+                }
             }
+        } finally {
+            globalLock.readLock().unlock();
         }
-        ConnectionKey newKey = new ConnectionKey(connection);
-        cache.put(newKey, new ConcurrentHashMap<>());
-        return newKey;
+
+        globalLock.writeLock().lock();
+        try {
+            for (ConnectionKey key : cache.keySet()) {
+                if (key.connection == connection) {
+                    return key;
+                }
+            }
+            ConnectionKey newKey = new ConnectionKey(connection);
+            cache.put(newKey, new LinkedHashMap<>());
+            return newKey;
+        } finally {
+            globalLock.writeLock().unlock();
+        }
     }
 
     private void evictOldestStatement(Map<String, PreparedStatement> connCache) {

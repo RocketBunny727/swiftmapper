@@ -6,7 +6,7 @@
 
     <groupId>io.github.rocketbunny727</groupId>
     <artifactId>swiftmapper</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <packaging>jar</packaging>
 
     <name>SwiftMapper</name>
@@ -43,6 +43,7 @@
         <hikari.version>5.1.0</hikari.version>
         <snakeyaml.version>2.2</snakeyaml.version>
         <caffeine.version>3.1.8</caffeine.version>
+        <aop.version>2.1.16.RELEASE</aop.version>
         <lombok.version>1.18.30</lombok.version>
         <junit.version>5.10.1</junit.version>
         <mockito.version>5.8.0</mockito.version>
@@ -72,6 +73,11 @@
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
             <version>${caffeine.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+            <version>${aop.version}</version>
         </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>

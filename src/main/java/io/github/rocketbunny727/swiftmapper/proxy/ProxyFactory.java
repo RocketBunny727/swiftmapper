@@ -13,6 +13,7 @@ import java.lang.reflect.Method;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.concurrent.locks.LockSupport;
 
 public class ProxyFactory {
     private static final SwiftLogger log = SwiftLogger.getLogger(ProxyFactory.class);
@@ -104,8 +105,10 @@ public class ProxyFactory {
                         throw new LazyLoadingException("Failed to load lazy entity " + entityClass.getSimpleName(), e);
                     }
                 } else {
+                    long parkNs = 100_000L;
                     while (state == State.LOADING) {
-                        Thread.yield();
+                        LockSupport.parkNanos(parkNs);
+                        parkNs = Math.min(parkNs * 2, 10_000_000L);
                     }
                     if (state == State.FAILED) {
                         throw new LazyLoadingException("Concurrent loading failed for " + entityClass.getSimpleName());

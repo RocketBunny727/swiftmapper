@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 
 public class ConnectionManager {
+    private final DatasourceConfig dsConfig;
     private final ConnectionPool connectionPool;
     private final String url;
     private final String username;
@@ -37,10 +38,16 @@ public class ConnectionManager {
 
     public static ConnectionManager fromConfig() {
         ConfigReader configReader = new ConfigReader();
+
+        ConfigReader.LoggingConfig loggingConfig = configReader.getLoggingConfig();
+        SwiftLogger.setLevel(loggingConfig.level());
+        SwiftLogger.setSqlLogging(loggingConfig.logSql());
+
         DatasourceConfig ds = configReader.getDatasourceConfig();
         log.info("Loaded datasource config: {}@{}", ds.username(), ds.url());
 
-        ConnectionManager manager = new ConnectionManager(ds);
+        ConfigReader.PoolConfig poolConfig = configReader.getPoolConfig();
+        ConnectionManager manager = new ConnectionManager(ds, poolConfig);
 
         if (ds.migrationsLocation() != null && !ds.migrationsLocation().isBlank()) {
             MigrationRunner runner =
@@ -55,8 +62,9 @@ public class ConnectionManager {
         return manager;
     }
 
-    private ConnectionManager(DatasourceConfig dsConfig) {
-        this.connectionPool = new ConnectionPool(dsConfig);
+    private ConnectionManager(DatasourceConfig dsConfig, ConfigReader.PoolConfig poolConfig) {
+        this.connectionPool = new ConnectionPool(dsConfig, poolConfig);
+        this.dsConfig = dsConfig;
         this.url = dsConfig.url();
         this.username = dsConfig.username();
         this.password = dsConfig.password();
@@ -68,38 +76,80 @@ public class ConnectionManager {
     }
 
     public ConnectionManager initSchema(Class<?>... entityClasses) throws SQLException {
-        Connection connection = null;
-        boolean originalAutoCommit = true;
+        String ddlAuto = dsConfig.ddlAuto();
+        if ("none".equalsIgnoreCase(ddlAuto)) {
+            log.info("ddl-auto=none, skipping schema initialization");
+            return this;
+        }
 
+        Connection connection = null;
         try {
             connection = getConnection();
-            originalAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(true);
 
-            for (Class<?> entityClass : entityClasses) {
-                createTable(connection, entityClass);
+            if ("create".equalsIgnoreCase(ddlAuto) || "create-drop".equalsIgnoreCase(ddlAuto)) {
+                log.info("ddl-auto={}, dropping existing tables...", ddlAuto);
+                dropTables(connection, entityClasses);
             }
 
-            for (Class<?> entityClass : entityClasses) {
-                createJoinTables(connection, entityClass);
+            if (!"validate".equalsIgnoreCase(ddlAuto)) {
+                for (Class<?> entityClass : entityClasses) createTable(connection, entityClass);
+                for (Class<?> entityClass : entityClasses) createJoinTables(connection, entityClass);
+            } else {
+                validateTables(connection, entityClasses);
             }
+
         } catch (SQLException e) {
             throw new ConnectionException("Failed to initialize schema", e);
         } finally {
             if (connection != null) {
-                try {
-                    connection.setAutoCommit(originalAutoCommit);
-                } catch (SQLException e) {
-                    log.warn("Failed to restore autoCommit state", e);
-                }
-                try {
-                    connection.close();
-                } catch (SQLException e) {
-                    log.error("Failed to close connection", e);
-                }
+                try { connection.setAutoCommit(false); } catch (SQLException ignored) {}
+                try { connection.close(); } catch (SQLException e) { log.error("Failed to close connection", e); }
             }
         }
         return this;
+    }
+
+    private void dropTables(Connection connection, Class<?>... entityClasses) throws SQLException {
+        for (int i = entityClasses.length - 1; i >= 0; i--) {
+            String tableName = NamingStrategy.getTableName(entityClasses[i]);
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute("DROP TABLE IF EXISTS " + qi(tableName) + " CASCADE");
+                log.info("Dropped table: {}", tableName);
+            }
+        }
+    }
+
+    private void validateTables(Connection connection, Class<?>... entityClasses) throws SQLException {
+        for (Class<?> entityClass : entityClasses) {
+            String tableName = NamingStrategy.getTableName(entityClass);
+            String sql = "SELECT 1 FROM information_schema.tables WHERE table_name = ?";
+            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                stmt.setString(1, tableName);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new IllegalStateException(
+                                "ddl-auto=validate: table '" + tableName + "' not found in database");
+                    }
+                }
+            }
+            log.info("ddl-auto=validate: table '{}' OK", tableName);
+        }
+    }
+
+    private static String qi(String identifier) {
+        if (identifier == null || identifier.isEmpty()) {
+            throw new IllegalArgumentException("DDL identifier cannot be null or empty");
+        }
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static void validateDdlLiteral(String value, String context) {
+        if (value == null) return;
+        if (value.contains(";") || value.contains("--") || value.contains("/*") || value.contains("*/")) {
+            throw new SecurityException(
+                    "Potentially dangerous SQL in " + context + ": " + value);
+        }
     }
 
     private boolean constraintExists(Connection connection, String constraintName) {
@@ -155,7 +205,7 @@ public class ConnectionManager {
                 String idxName = idx.name().isEmpty() ?
                         "idx_" + tableName + "_" + colName : idx.name();
                 indexes.add(String.format("CREATE %sINDEX %s ON %s(%s)",
-                        idx.unique() ? "UNIQUE " : "", idxName, tableName, colName));
+                        idx.unique() ? "UNIQUE " : "", qi(idxName), qi(tableName), qi(colName)));
             }
 
             if (field.isAnnotationPresent(Id.class)) {
@@ -175,7 +225,7 @@ public class ConnectionManager {
                 Class<?> targetClass = field.getType();
                 String targetIdType = getTargetIdSqlType(targetClass);
 
-                columns.add(fkColumn + " " + targetIdType);
+                columns.add(qi(fkColumn) + " " + targetIdType);
 
                 String targetTable = NamingStrategy.getTableName(targetClass);
                 String referencedCol = jc != null && !jc.referencedColumnName().isEmpty() ?
@@ -184,7 +234,7 @@ public class ConnectionManager {
                 String fkName = NamingStrategy.getFkConstraintName(tableName, fkColumn);
                 foreignKeys.put(fkName, String.format(
                         "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
-                        tableName, fkName, fkColumn, targetTable, referencedCol
+                        qi(tableName), qi(fkName), qi(fkColumn), qi(targetTable), qi(referencedCol)
                 ));
             } else if (field.isAnnotationPresent(OneToOne.class)) {
                 OneToOne oo = field.getAnnotation(OneToOne.class);
@@ -195,7 +245,7 @@ public class ConnectionManager {
                     Class<?> targetClass = field.getType();
                     String targetIdType = getTargetIdSqlType(targetClass);
 
-                    columns.add(fkColumn + " " + targetIdType);
+                    columns.add(qi(fkColumn) + " " + targetIdType);
 
                     String targetTable = NamingStrategy.getTableName(targetClass);
                     String referencedCol = jc != null && !jc.referencedColumnName().isEmpty() ?
@@ -204,7 +254,7 @@ public class ConnectionManager {
                     String fkName = NamingStrategy.getFkConstraintName(tableName, fkColumn);
                     foreignKeys.put(fkName, String.format(
                             "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
-                            tableName, fkName, fkColumn, targetTable, referencedCol
+                            qi(tableName), qi(fkName), qi(fkColumn), qi(targetTable), qi(referencedCol)
                     ));
                 }
             } else if (!isRelationshipField(field)) {
@@ -225,6 +275,7 @@ public class ConnectionManager {
                 if (field.isAnnotationPresent(DefaultValue.class)) {
                     DefaultValue dv = field.getAnnotation(DefaultValue.class);
                     defaultValue = dv.value();
+                    validateDdlLiteral(defaultValue, "@DefaultValue on " + field.getName());
                 }
 
                 if (field.isAnnotationPresent(ColumnDefinition.class)) {
@@ -252,20 +303,22 @@ public class ConnectionManager {
 
                 if (field.isAnnotationPresent(Check.class)) {
                     Check check = field.getAnnotation(Check.class);
+                    validateDdlLiteral(check.value(), "@Check on " + field.getName());
                     checkConstraint = " CHECK (" + check.value() + ")";
                 }
 
-                columns.add(colName + " " + sqlType + notNullClause + uniqueClause + defaultClause +
+                columns.add(qi(colName) + " " + sqlType + notNullClause + uniqueClause + defaultClause +
                         (checkConstraint != null ? checkConstraint : ""));
             }
         }
 
         if (classCheck != null) {
-            tableConstraints.add("CONSTRAINT chk_" + tableName + " CHECK (" + classCheck.value() + ")");
+            validateDdlLiteral(classCheck.value(), "@Check on " + entityClass.getSimpleName());
+            tableConstraints.add("CONSTRAINT " + qi("chk_" + tableName) + " CHECK (" + classCheck.value() + ")");
         }
 
         StringBuilder sql = new StringBuilder("CREATE TABLE IF NOT EXISTS ");
-        sql.append(tableName).append("(").append(String.join(", ", columns));
+        sql.append(qi(tableName)).append("(").append(String.join(", ", columns));
 
         if (!tableConstraints.isEmpty()) {
             sql.append(", ").append(String.join(", ", tableConstraints));
@@ -273,7 +326,7 @@ public class ConnectionManager {
 
         sql.append(")");
 
-        log.info("Creating table: {}", sql);
+        log.showSQL(sql.toString());
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(sql.toString());
             log.info("Created table: {}", tableName);
@@ -287,19 +340,19 @@ public class ConnectionManager {
             if (!constraintExists(connection, entry.getKey())) {
                 try (Statement stmt = connection.createStatement()) {
                     stmt.execute(entry.getValue());
-                    log.info("Created FK: {}", entry.getValue());
+                    log.showSQL(entry.getValue());
                 } catch (SQLException e) {
                     log.warn("Error creating FK: {}", e.getMessage());
                 }
             } else {
-                log.info("FK {} already exists", entry.getKey());
+                log.debug("FK {} already exists", entry.getKey());
             }
         }
 
         for (String indexSql : indexes) {
             try (Statement stmt = connection.createStatement()) {
                 stmt.execute(indexSql);
-                log.info("Created index: {}", indexSql);
+                log.showSQL(indexSql);
             } catch (SQLException e) {
                 log.warn("Failed to create index: {}", e.getMessage());
             }
@@ -337,10 +390,14 @@ public class ConnectionManager {
         String ownerIdType = getTargetIdSqlType(ownerClass);
         String targetIdType = getTargetIdSqlType(targetClass);
 
-        String sql = String.format("CREATE TABLE IF NOT EXISTS %s (%s %s NOT NULL, %s %s NOT NULL, PRIMARY KEY (%s, %s))",
-                joinTableName, joinCol, ownerIdType, inverseCol, targetIdType, joinCol, inverseCol);
+        String sql = String.format(
+                "CREATE TABLE IF NOT EXISTS %s (%s %s NOT NULL, %s %s NOT NULL, PRIMARY KEY (%s, %s))",
+                qi(joinTableName),
+                qi(joinCol), ownerIdType,
+                qi(inverseCol), targetIdType,
+                qi(joinCol), qi(inverseCol));
 
-        log.info("Creating join table: {}", sql);
+        log.showSQL(sql);
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(sql);
         }
@@ -357,11 +414,12 @@ public class ConnectionManager {
 
     private void addForeignKey(Connection connection, String table, String fkName, String col, String refTable, String refCol) {
         if (!constraintExists(connection, fkName)) {
-            String sql = String.format("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s) ON DELETE CASCADE",
-                    table, fkName, col, refTable, refCol);
+            String sql = String.format(
+                    "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s) ON DELETE CASCADE",
+                    qi(table), qi(fkName), qi(col), qi(refTable), qi(refCol));
             try (Statement stmt = connection.createStatement()) {
                 stmt.execute(sql);
-                log.info("Created FK: {}", sql);
+                log.showSQL(sql);
             } catch (SQLException e) {
                 log.warn("Error creating FK {}: {}", fkName, e.getMessage());
             }
@@ -408,13 +466,13 @@ public class ConnectionManager {
         String sqlType = getSqlType(idField, true, gen);
 
         if (gen != null && gen.strategy() == Strategy.PATTERN) {
-            return idColumn + " " + sqlType + " PRIMARY KEY";
+            return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
         } else if (gen != null && gen.strategy() == Strategy.IDENTITY) {
-            return idColumn + " " + sqlType + " PRIMARY KEY";
+            return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
         } else if (gen != null && gen.strategy() == Strategy.ALPHA) {
-            return idColumn + " BIGINT PRIMARY KEY";
+            return qi(idColumn) + " BIGINT PRIMARY KEY";
         }
-        return idColumn + " " + sqlType + " PRIMARY KEY";
+        return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
     }
 
     private void createSequence(Connection connection, String tableName, String idColumn, long startValue) throws SQLException {
@@ -433,7 +491,7 @@ public class ConnectionManager {
 
         String createSql = String.format(
                 "CREATE SEQUENCE %s START WITH %d INCREMENT BY 1 NO MINVALUE NO MAXVALUE OWNED BY %s.%s",
-                seqName, startValue, tableName, idColumn
+                qi(seqName), startValue, qi(tableName), qi(idColumn)
         );
 
         try (Statement stmt = connection.createStatement()) {
@@ -491,13 +549,20 @@ public class ConnectionManager {
             case "LocalDateTime" -> "TIMESTAMP";
             case "LocalDate" -> "DATE";
             case "LocalTime" -> "TIME";
-            case "byte[]" -> "BYTEA";
-            case "Byte[]" -> "BYTEA";
+            case "byte[]", "Byte[]" -> "BYTEA";
             default -> "VARCHAR(255)";
         };
     }
 
     public void close() {
+        if ("create-drop".equalsIgnoreCase(dsConfig.ddlAuto())) {
+            log.info("ddl-auto=create-drop, dropping tables on shutdown...");
+            try (Connection conn = getConnection()) {
+                conn.setAutoCommit(true);
+            } catch (SQLException e) {
+                log.warn("Failed to drop tables on shutdown: {}", e.getMessage());
+            }
+        }
         statementCache.clear();
         connectionPool.close();
         log.info("Connection pool closed");

@@ -23,8 +23,6 @@ public class CriteriaBuilder<T> {
             "ORDER", "LIMIT", "OFFSET", "EXEC", "EXECUTE", "SCRIPT", "--", "/*", "*/", ";"
     );
 
-    private static final Set<String> VALID_OPERATORS = Set.of("=", "<>", ">", "<", ">=", "<=", "LIKE");
-
     public CriteriaBuilder(Class<T> entityClass) {
         this.entityClass = entityClass;
         this.sqlBuilder = new SQLQueryBuilder();
@@ -209,67 +207,6 @@ public class CriteriaBuilder<T> {
             case "IS NULL" -> sqlBuilder.isNull(prop);
             case "IS NOT NULL" -> sqlBuilder.isNotNull(prop);
         }
-    }
-
-    public CriteriaQuery<T> buildLegacy() {
-        String tableName = NamingStrategy.getTableName(entityClass);
-        String escapedTableName = escapeIdentifier(tableName);
-        StringBuilder sql = new StringBuilder("SELECT * FROM ").append(escapedTableName);
-        List<Object> params = new ArrayList<>();
-
-        if (!criteria.isEmpty()) {
-            sql.append(" WHERE ");
-            for (int i = 0; i < criteria.size(); i++) {
-                if (i > 0) sql.append(" AND ");
-                Criterion c = criteria.get(i);
-
-                if (!VALID_OPERATORS.contains(c.operator) && !c.operator.startsWith("IS")) {
-                    throw new SecurityException("Invalid operator: " + c.operator);
-                }
-
-                if (c.operator.equals("IN")) {
-                    sql.append(c.property).append(" IN (");
-                    List<?> values = (List<?>) c.value;
-                    if (values.isEmpty()) {
-                        sql.append("NULL");
-                    } else {
-                        for (int j = 0; j < values.size(); j++) {
-                            if (j > 0) sql.append(", ");
-                            sql.append("?");
-                            params.add(values.get(j));
-                        }
-                    }
-                    sql.append(")");
-                } else if (c.value == null && (c.operator.equals("IS NULL") || c.operator.equals("IS NOT NULL"))) {
-                    sql.append(c.property).append(" ").append(c.operator);
-                } else {
-                    sql.append(c.property).append(" ").append(c.operator).append(" ?");
-                    params.add(c.value);
-                }
-            }
-        }
-
-        if (!orders.isEmpty()) {
-            sql.append(" ORDER BY ");
-            for (int i = 0; i < orders.size(); i++) {
-                if (i > 0) sql.append(", ");
-                Order order = orders.get(i);
-                if (!order.direction.equals("ASC") && !order.direction.equals("DESC")) {
-                    throw new SecurityException("Invalid sort direction: " + order.direction);
-                }
-                sql.append(order.property).append(" ").append(order.direction);
-            }
-        }
-
-        if (limit != null) {
-            sql.append(" LIMIT ").append(limit);
-        }
-
-        if (offset != null) {
-            sql.append(" OFFSET ").append(offset);
-        }
-
-        return new CriteriaQuery<>(sql.toString(), params);
     }
 
     private String escapeIdentifier(String identifier) {

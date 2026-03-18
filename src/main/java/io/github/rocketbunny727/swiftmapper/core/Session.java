@@ -53,6 +53,8 @@ public class Session<T> {
     @Getter
     private final MetricsCollector metricsCollector;
     private static final QueryCache queryCache = new QueryCache();
+    private static final java.util.concurrent.atomic.AtomicBoolean cacheConfigured =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private Connection dedicatedConnection;
     private boolean externalConnection = false;
@@ -73,8 +75,10 @@ public class Session<T> {
         ConfigReader configReader = new ConfigReader();
         ConfigReader.CacheConfig cacheConfig = configReader.getCacheConfig();
         this.cacheEnabled = cacheConfig.enabled();
-        queryCache.configure(cacheConfig.enabled(), cacheConfig.maxSize(),
-                cacheConfig.expireMinutes(), cacheConfig.providerClass());
+        if (cacheConfigured.compareAndSet(false, true)) {
+            queryCache.configure(cacheConfig.enabled(), cacheConfig.maxSize(),
+                    cacheConfig.expireMinutes(), cacheConfig.providerClass());
+        }
 
         log.info("Session created for {}", entityClass.getSimpleName());
     }
@@ -154,7 +158,7 @@ public class Session<T> {
 
         if (cacheEnabled) {
             String cacheKey = entityClass.getName() + ":findById:" + id;
-            List<T> cachedResult = queryCache.get(cacheKey, () -> null);
+            List<T> cachedResult = queryCache.getIfPresent(cacheKey);
             if (cachedResult != null && !cachedResult.isEmpty()) {
                 metricsCollector.recordCacheHit("query");
                 log.debug("Cache hit for findById: {}", id);
@@ -163,7 +167,7 @@ public class Session<T> {
             metricsCollector.recordCacheMiss("query");
         }
 
-        log.debug("SQL: {}", sql);
+        log.showSQL(sql, id);
         QueryLogEntry logEntry = queryLogger.logQueryStart(sql, id);
         Instant start = Instant.now();
 
@@ -180,6 +184,11 @@ public class Session<T> {
                 log.warn("Entity not found by id: {}", id);
                 return Optional.empty();
             }
+
+            if (cacheEnabled) {
+                queryCache.put(entityClass.getName() + ":findById:" + id, result);
+            }
+
             log.info("Entity found by id: {}", id);
             return Optional.of(result.get(0));
         } catch (Exception e) {
@@ -265,7 +274,7 @@ public class Session<T> {
 
         if (columns.isEmpty()) {
             String sql = String.format("INSERT INTO %s DEFAULT VALUES", tableName);
-            log.debug("Executing SQL: {}", sql);
+            log.showSQL(sql);
 
             QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
             try (PreparedStatement stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
@@ -293,7 +302,7 @@ public class Session<T> {
         placeholders.setLength(placeholders.length() - 1);
 
         String sql = String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columns, placeholders);
-        log.debug("Executing SQL: {}", sql);
+        log.showSQL(sql, params.toArray());
         QueryLogEntry logEntry = queryLogger.logQueryStart(sql, params.toArray());
 
         PreparedStatement stmt = null;
@@ -1027,7 +1036,7 @@ public class Session<T> {
                 getTableName(), setClause, getIdColumn());
         params.add(idValue);
 
-        log.debug("SQL: {}", sql);
+        log.showSQL(sql, params.toArray());
         QueryLogEntry logEntry = queryLogger.logQueryStart(sql, params.toArray());
 
         PreparedStatement stmt = null;
@@ -1298,7 +1307,7 @@ public class Session<T> {
         }
 
         String sql = String.format("DELETE FROM %s WHERE %s = ?", getTableName(), getIdColumn());
-        log.debug("SQL: {}", sql);
+        log.showSQL(sql, id);
         QueryLogEntry logEntry = queryLogger.logQueryStart(sql, id);
 
         PreparedStatement stmt = null;
@@ -1348,7 +1357,7 @@ public class Session<T> {
 
         if (cacheEnabled) {
             String cacheKey = entityClass.getName() + ":findAll";
-            List<T> cached = queryCache.get(cacheKey, () -> null);
+            List<T> cached = queryCache.getIfPresent(cacheKey);
             if (cached != null) {
                 metricsCollector.recordCacheHit("query");
                 return cached;
@@ -1364,6 +1373,11 @@ public class Session<T> {
             List<T> result = executeQuery(conn, sql);
             queryLogger.logQueryEnd(logEntry, result.size(), null);
             metricsCollector.recordQuery("findAll", Duration.between(start, Instant.now()), true);
+
+            if (cacheEnabled) {
+                queryCache.put(entityClass.getName() + ":findAll", result);
+            }
+
             return result;
         } catch (SQLException e) {
             queryLogger.logQueryEnd(logEntry, 0, e);
@@ -1376,11 +1390,11 @@ public class Session<T> {
 
     public List<T> query(String sql, Object... params) throws SQLException {
         validateQuery(sql);
-        log.debug("Custom query: {}", sql);
+        log.showSQL(sql, params);
 
         if (cacheEnabled && ALLOWED_QUERY_PATTERN.matcher(sql).matches()) {
             String cacheKey = sql + Arrays.toString(params);
-            List<T> cached = queryCache.get(cacheKey, () -> null);
+            List<T> cached = queryCache.getIfPresent(cacheKey);
             if (cached != null) {
                 metricsCollector.recordCacheHit("query");
                 return cached;
@@ -1396,6 +1410,11 @@ public class Session<T> {
             List<T> result = executeQuery(conn, sql, params);
             queryLogger.logQueryEnd(logEntry, result.size(), null);
             metricsCollector.recordQuery("query", Duration.between(start, Instant.now()), true);
+
+            if (cacheEnabled && ALLOWED_QUERY_PATTERN.matcher(sql).matches()) {
+                queryCache.put(sql + Arrays.toString(params), result);
+            }
+
             return result;
         } catch (SQLException e) {
             queryLogger.logQueryEnd(logEntry, 0, e);
@@ -1423,7 +1442,7 @@ public class Session<T> {
     }
 
     private List<T> executeQuery(Connection connection, String sql, Object... params) throws SQLException {
-        log.debug("Executing query: {}", sql);
+        log.showSQL(sql, params);
         List<T> result = new ArrayList<>();
         EntityMapper<T> mapper = EntityMapper.getInstance(entityClass, connectionManager);
 
@@ -1621,11 +1640,12 @@ public class Session<T> {
             boolean isH2 = dbName.contains("h2");
 
             try {
+                String quotedSeq = "\"" + seqName.replace("\"", "\"\"") + "\"";
                 String sql;
                 if (isH2) {
-                    sql = String.format("ALTER SEQUENCE %s RESTART WITH %d", seqName, startValue);
+                    sql = String.format("ALTER SEQUENCE %s RESTART WITH %d INCREMENT BY 1", quotedSeq, startValue);
                 } else {
-                    sql = String.format("ALTER SEQUENCE %s RESTART WITH %d", seqName, startValue);
+                    sql = String.format("ALTER SEQUENCE %s RESTART WITH %d", quotedSeq, startValue);
                 }
 
                 QueryLogEntry logEntry = queryLogger.logQueryStart(sql);

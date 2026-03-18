@@ -70,6 +70,19 @@ public class QueryCache {
         return result;
     }
 
+    @SuppressWarnings("unchecked")
+    public <T> List<T> getIfPresent(String key) {
+        if (!enabled || cache == null) return null;
+        return (List<T>) cache.getIfPresent(key);
+    }
+
+    public void put(String key, List<?> value) {
+        if (enabled && cache != null && value != null) {
+            cache.put(key, value);
+            log.debug("Cached result for key: {}", key);
+        }
+    }
+
     public void invalidate(String key) {
         if (cache != null) {
             cache.invalidate(key);

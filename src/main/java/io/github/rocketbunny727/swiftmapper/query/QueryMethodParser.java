@@ -50,6 +50,7 @@ public class QueryMethodParser {
             new TokenPattern("Regex", " ~ ?", 1),
             new TokenPattern("NotIn", " NOT IN ", -1),
             new TokenPattern("Nin", " NOT IN ", -1),
+            new TokenPattern("Ids", " IN ", -1),
             new TokenPattern("In", " IN ", -1),
             new TokenPattern("NotNull", " IS NOT NULL", 0),
             new TokenPattern("Null", " IS NULL", 0),
@@ -130,16 +131,33 @@ public class QueryMethodParser {
             sql.append(" ORDER BY ").append(orderClause.sql());
         }
 
+        boolean isSingleResult = operation.equals("findFirst")
+                || !topCount.isEmpty()
+                || isOptionalReturnType(method)
+                || isDirectEntityReturnType(method);
+
         if (operation.equals("findFirst") || (operation.equals("findTop") && !topCount.isEmpty())) {
             int limit = topCount.isEmpty() ? 1 : Integer.parseInt(topCount);
             sql.append(" LIMIT ").append(limit);
+        } else if (isSingleResult && queryType == QueryType.SELECT) {
+            sql.append(" LIMIT 1");
         }
 
         String finalSql = sql.toString();
-        log.debug("Generated SQL: {}", finalSql);
+        Object[] bindingValues = bindings.stream()
+                .map(ParameterBinding::value)
+                .toArray();
+        log.showSQL(finalSql, bindingValues);
 
-        return new ParsedQuery(finalSql, bindings, queryType,
-                operation.equals("findFirst") || !topCount.isEmpty());
+        return new ParsedQuery(finalSql, bindings, queryType, isSingleResult);
+    }
+
+    private boolean isOptionalReturnType(Method method) {
+        return Optional.class.isAssignableFrom(method.getReturnType());
+    }
+
+    private boolean isDirectEntityReturnType(Method method) {
+        return method.getReturnType() == mapper.getEntityClass();
     }
 
     private String escapeIdentifier(String identifier) {
@@ -231,7 +249,7 @@ public class QueryMethodParser {
         }
         String upper = propertyName.toUpperCase();
         for (String keyword : SQL_KEYWORDS) {
-            if (upper.contains(keyword)) {
+            if (upper.equals(keyword)) {
                 throw new SecurityException("SQL injection attempt detected in property: " + propertyName);
             }
         }
@@ -241,8 +259,7 @@ public class QueryMethodParser {
     }
 
     private JoinInfo findExistingJoin(List<JoinInfo> joins, String foreignKey) {
-        for (int i = 0; i < joins.size(); i++) {
-            JoinInfo join = joins.get(i);
+        for (JoinInfo join : joins) {
             if (join.foreignKey().equals(foreignKey)) {
                 return join;
             }
@@ -269,11 +286,9 @@ public class QueryMethodParser {
         if (tableName.length() > 64) {
             throw new IllegalArgumentException("Table name too long: " + tableName);
         }
-
         if (!tableName.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
             throw new SecurityException("Invalid table name format (SQL injection prevention): " + tableName);
         }
-
         if (SQL_KEYWORDS.contains(tableName.toUpperCase())) {
             throw new SecurityException("Table name cannot be a reserved SQL keyword: " + tableName);
         }
@@ -340,7 +355,6 @@ public class QueryMethodParser {
                 String propertyCondition = remainder;
 
                 String fkColumn = NamingStrategy.getForeignKeyColumn(relField.field());
-
                 String pkColumn = getIdColumnName(targetClass);
 
                 JoinInfo existingJoin = findExistingJoin(joins, fkColumn);
@@ -367,6 +381,16 @@ public class QueryMethodParser {
             }
         }
         return "id";
+    }
+
+    private String getIdPropertyName() {
+        List<Field> fields = getAllFields(mapper.getEntityClass());
+        for (Field field : fields) {
+            if (field.isAnnotationPresent(Id.class)) {
+                return field.getName();
+            }
+        }
+        throw new IllegalStateException("No @Id field found in " + mapper.getEntityClass().getName());
     }
 
     private String extractPropertyName(String condition) {
@@ -431,12 +455,15 @@ public class QueryMethodParser {
             String suffix = pattern.name();
             if (token.endsWith(suffix)) {
                 int suffixStart = token.length() - suffix.length();
-                if (suffixStart == 0 ||
-                        (suffixStart > 0 && Character.isUpperCase(token.charAt(suffixStart)))) {
-                    String property = token.substring(0, suffixStart);
-                    if (property.isEmpty()) {
-                        return new PropertyCondition(token, new TokenPattern("Equals", " = ?", 1));
+                if (suffixStart == 0) {
+                    if (suffix.equals("Ids")) {
+                        String idProperty = getIdPropertyName();
+                        return new PropertyCondition(idProperty, pattern);
                     }
+                    return new PropertyCondition(token, new TokenPattern("Equals", " = ?", 1));
+                }
+                if (Character.isUpperCase(token.charAt(suffixStart))) {
+                    String property = token.substring(0, suffixStart);
                     validatePropertyName(property);
                     return new PropertyCondition(property, pattern);
                 }

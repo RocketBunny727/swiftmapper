@@ -9,136 +9,899 @@
 
 **SwiftMapper** is a lightweight, high-performance ORM (Object-Relational Mapping) framework for Java. Designed with simplicity and speed in mind, it provides a modern alternative to heavyweight ORM solutions while maintaining full control over your database interactions.
 
-## ✨ Features
+---
 
-- **Lightweight & Fast** - Minimal overhead with optimized query execution.
-- **Annotation-Based Configuration** - Clean, declarative entity mapping.
-- **Lazy Loading** - Efficient proxy-based lazy loading for relationships.
-- **Connection Pooling** - Built-in HikariCP integration for optimal performance.
-- **Query Caching** - Configurable multi-level caching with Caffeine.
-- **Criteria API** - Type-safe query building with a fluent API.
-- **Transaction Support** - Programmatic and declarative transaction management.
-- **Validation** - Bean validation with custom annotations.
+## Table of Contents
 
-## 🚀 Quick Start
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Quick Start](#quick-start)
+- [Entity Mapping](#entity-mapping)
+- [Repositories](#repositories)
+- [Query Methods](#query-methods)
+- [Criteria Builder API](#criteria-builder-api)
+- [Transaction Management](#transaction-management)
+- [Caching](#caching)
+- [Lazy Loading](#lazy-loading)
+- [Schema Migrations](#schema-migrations)
+- [Relationship Mapping](#relationship-mapping)
+- [Validation](#validation)
+- [Spring Boot Integration](#spring-boot-integration)
+- [Supported Databases](#supported-databases)
+- [FAQ](#faq)
 
-### Maven Dependency
+---
+
+## Features
+
+- **Lightweight & Fast** — Minimal overhead with optimized query execution
+- **Annotation-Based Configuration** — Clean, declarative entity mapping
+- **Lazy Loading** — Efficient proxy-based lazy loading for relationships via ByteBuddy
+- **Connection Pooling** — Built-in HikariCP integration for optimal performance
+- **Query Caching** — Configurable multi-level caching with Caffeine
+- **Criteria API** — Type-safe programmatic query building with a fluent API
+- **Transaction Support** — Programmatic and declarative transaction management with savepoint nesting
+- **Validation** — Bean validation with custom annotations
+- **Auto Schema Generation** — Automatic DDL creation from entity classes
+- **Database Migrations** — Versioned SQL migration runner
+- **Statement Cache** — Per-connection prepared statement caching
+
+---
+
+## Requirements
+
+- Java 17 or later
+- Maven 3.6+ or Gradle 7+
+- Supported database (PostgreSQL, H2, MySQL — see [Supported Databases](#supported-databases))
+
+---
+
+## Installation
+
+### Maven
 
 ```xml
 <dependency>
     <groupId>io.github.rocketbunny727</groupId>
     <artifactId>swiftmapper</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.2</version>
 </dependency>
 ```
 
-### Basic Usage
-1. Setup properties in application.yml/application.properties
-```yml
+You will also need a JDBC driver for your database:
+
+```xml
+<!-- PostgreSQL -->
+<dependency>
+    <groupId>org.postgresql</groupId>
+    <artifactId>postgresql</artifactId>
+    <version>42.7.3</version>
+</dependency>
+
+<!-- H2 (for tests) -->
+<dependency>
+    <groupId>com.h2database</groupId>
+    <artifactId>h2</artifactId>
+    <version>2.2.224</version>
+    <scope>test</scope>
+</dependency>
+```
+
+---
+
+## Configuration
+
+Create `application.yml` or `application.properties` in your classpath root.
+
+### application.yml (full reference)
+
+```yaml
 swiftmapper:
   datasource:
-    url: jdbc:postgresql://localhost:5432/swift_test_db
+    url: jdbc:postgresql://localhost:5432/mydb
     username: postgres
-    password: 471979
+    password: secret
     driver-class-name: org.postgresql.Driver
 
   migrations:
-    location: db/migrations
+    location: db/migrations        # classpath folder with .sql migration files
 
   logging:
-    level: DEBUG
-    sql: true
-    transactions: true
-    slow-query-threshold: 1000
+    level: DEBUG                   # OFF, ERROR, WARN, INFO, DEBUG
+    sql: true                      # log every generated SQL statement
+    transactions: true             # log transaction begin/commit/rollback
+    slow-query-threshold: 1000     # milliseconds; queries slower than this are warned
 
   cache:
     enabled: true
-    max-size: 1000
-    expire-minutes: 10
+    max-size: 1000                 # maximum number of cached query results
+    expire-minutes: 10             # TTL for cached entries
     provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
 
   pool:
-    max-size: 10
-    min-idle: 5
-    connection-timeout: 30000
-    idle-timeout: 600000
-    max-lifetime: 1800000
-    leak-detection-threshold: 60000
+    max-size: 10                   # maximum pool connections
+    min-idle: 5                    # minimum idle connections to keep
+    connection-timeout: 30000      # ms to wait for a free connection
+    idle-timeout: 600000           # ms before an idle connection is evicted
+    max-lifetime: 1800000          # ms before a connection is forcibly retired
+    leak-detection-threshold: 60000 # ms; log a warning if a connection is held longer
 ```
 
-2. Create Entity class
+### application.properties (equivalent)
+
+```properties
+swiftmapper.datasource.url=jdbc:postgresql://localhost:5432/mydb
+swiftmapper.datasource.username=postgres
+swiftmapper.datasource.password=secret
+swiftmapper.datasource.driver-class-name=org.postgresql.Driver
+swiftmapper.migrations.location=db/migrations
+swiftmapper.logging.level=DEBUG
+swiftmapper.logging.sql=true
+swiftmapper.logging.transactions=true
+swiftmapper.logging.slow-query-threshold=1000
+swiftmapper.cache.enabled=true
+swiftmapper.cache.max-size=1000
+swiftmapper.cache.expire-minutes=10
+swiftmapper.pool.max-size=10
+swiftmapper.pool.min-idle=5
+swiftmapper.pool.connection-timeout=30000
+swiftmapper.pool.idle-timeout=600000
+swiftmapper.pool.max-lifetime=1800000
+swiftmapper.pool.leak-detection-threshold=60000
+```
+
+---
+
+## Quick Start
+
+### 1. Create an Entity
+
 ```java
-@Entity                                                              // mark class as entity
-@Table(name = "airplanes")                                           // name of BD table
+@Entity
+@Table(name = "cars")
 @Getter
 @Setter
-public class Airplane {
-    @Id                                                              // mark field as table primary key
-    @GeneratedValue(strategy = Strategy.IDENTITY)
-    private String id;
+public class Car {
 
-    @Column(nullable = false)                                        // nullable and other constraints
-    private String manufacturer;
+    @Id
+    @GeneratedValue(strategy = Strategy.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String brand;
 
     @Column(nullable = false)
     private String model;
 
-    @Column(nullable = false, name = "pass_capacity")
-    private int PassCapacity;
+    @Column(name = "release_year", nullable = false)
+    private int releaseYear;
 
-    @Column(nullable = false)
-    private String number;
+    @Column(unique = true, nullable = false)
+    private String vin;
 }
 ```
 
-3. Create Repository
+### 2. Create a Repository Interface
+
 ```java
-public interface AirplaneRepository extends Repository<Airplane, String> {
-    List<Airplane> findByManufacturer(String manufacturer);
-    Optional<Airplane> findByNumber(String number);
-    List<Airplane> findByModelContaining(String pattern);
+public interface CarRepository extends Repository<Car, Long> {
+    List<Car> findAllByBrand(String brand);
+    Optional<Car> findByVin(String vin);
+    List<Car> findByBrandAndModel(String brand, String model);
+    List<Car> findAllByIds(List<Long> ids);
+    List<Car> findByModelContaining(String pattern);
+    List<Car> findByReleaseYearGreaterThan(int year);
+    long countByBrand(String brand);
+    void deleteByBrand(String brand);
 }
 ```
 
-4. Initialize Context
+### 3. Initialize the Context
+
 ```java
-@Configuration                                                       // Configure Spring Boot beans
+@Configuration
 public class SwiftMapperConfig {
 
     @Bean(destroyMethod = "close")
     public SwiftMapperContext swiftMapperContext() throws Exception {
         return SwiftMapperContext.fromConfig()
-                .initSchema(Airplane.class);                         // all @Entity classes
+                .initSchema(Car.class);
     }
 
-    @Bean                                                            // all repositories you need
-    public AirplaneRepository airplanes(SwiftMapperContext ctx) {
-        return ctx.getRepository(AirplaneRepository.class);
+    @Bean
+    public CarRepository carRepository(SwiftMapperContext ctx) {
+        return ctx.getRepository(CarRepository.class);
     }
 }
 ```
 
-5. Basic CRUD
+### 4. Use the Repository
+
 ```java
-Airplane boeing = new Airplane();
-boeing.setManufacturer("Boeing");
-boeing.setModel("737-800");
-boeing.setNumber("RA-00727")
+@Service
+@RequiredArgsConstructor
+public class CarService {
 
-airplanes.save(boeing);                                              // saving
+    private final CarRepository carRepository;
 
-Optional<Airplane> found1 = airplanes.findById(boeing.getId());      // finding by default repository method
-Optional<Airplane> found2 = airplanes.findByNumer("RA-00727");       // finding by generated repository method   
+    public Car registerCar(String brand, String model, int year, String vin) {
+        Car car = new Car();
+        car.setBrand(brand);
+        car.setModel(model);
+        car.setReleaseYear(year);
+        car.setVin(vin);
+        return carRepository.save(car);
+    }
+
+    public List<Car> getByBrand(String brand) {
+        return carRepository.findAllByBrand(brand);
+    }
+
+    public Optional<Car> findByVin(String vin) {
+        return carRepository.findByVin(vin);
+    }
+}
 ```
 
-6. Programmatic Queries (Criteria Builder)
-```java
-CriteriaBuilder<Airplane> cb = new CriteriaBuilder<>(Airplane.class);
-var query = cb.equal("manufacturer", "Boeing")
-              .greaterThan("pass_capacity", 100)
-              .orderByAsc("model")
-              .limit(10)
-              .build();
+---
 
-List<Airplane> results = airplanes.query(query.sql(), query.params().toArray());
+## Entity Mapping
+
+### Core Annotations
+
+| Annotation | Target | Description |
+|---|---|---|
+| `@Entity` | Class | Marks the class as a persistent entity |
+| `@Table(name = "...")` | Class | Maps the class to a specific table name |
+| `@Id` | Field | Marks the primary key field |
+| `@GeneratedValue(strategy = ...)` | Field | Configures ID generation strategy |
+| `@Column(...)` | Field | Customizes column mapping |
+| `@Transient` | Field | Excludes the field from persistence |
+| `@Lob` | Field | Maps to a large-object column (BLOB/CLOB) |
+| `@Temporal(value = ...)` | Field | Maps Java time types to SQL date/time types |
+| `@Index(name = "...", unique = ...)` | Field | Creates a database index on this column |
+| `@ColumnDefinition(value = "...")` | Field | Provides a raw SQL column type definition |
+| `@Check(value = "...")` | Class/Field | Adds a SQL CHECK constraint |
+
+### @Column attributes
+
+```java
+@Column(
+    name = "first_name",       // custom column name (default: snake_case of field name)
+    nullable = false,          // NOT NULL constraint
+    unique = false,            // UNIQUE constraint
+    length = 100,              // VARCHAR length
+    sqlType = "VARCHAR(100)"   // raw SQL type override
+)
+private String firstName;
 ```
+
+### ID Generation Strategies
+
+```java
+// Auto-increment (GENERATED BY DEFAULT AS IDENTITY)
+@Id
+@GeneratedValue(strategy = Strategy.IDENTITY)
+private Long id;
+
+// Custom DB sequence
+@Id
+@GeneratedValue(strategy = Strategy.SEQUENCE, startValue = 1000)
+private Long id;
+
+// String prefix + sequence counter (e.g. "CAR_1001")
+@Id
+@GeneratedValue(strategy = Strategy.PATTERN, prefix = "CAR_", startValue = 1000)
+private String id;
+
+// Auto alpha-numeric ID
+@Id
+@GeneratedValue(strategy = Strategy.ALPHA)
+private Long id;
+```
+
+### Supported Java Types
+
+SwiftMapper automatically maps these Java types to SQL:
+
+| Java Type | SQL Type |
+|---|---|
+| `String` | `VARCHAR(255)` |
+| `Long` / `long` | `BIGINT` |
+| `Integer` / `int` | `INTEGER` |
+| `Double` / `double` | `DOUBLE PRECISION` |
+| `Float` / `float` | `REAL` |
+| `Boolean` / `boolean` | `BOOLEAN` |
+| `LocalDateTime` | `TIMESTAMP` |
+| `LocalDate` | `DATE` |
+| `LocalTime` | `TIME` |
+| `byte[]` | `BYTEA` |
+
+---
+
+## Repositories
+
+Every repository interface must extend `Repository<T, ID>`, where `T` is the entity type and `ID` is the primary key type.
+
+### Built-in Repository Methods
+
+```java
+T save(T entity);
+List<T> saveAll(List<T> entities);
+T update(T entity);
+List<T> updateAll(List<T> entities);
+Optional<T> findById(ID id);
+boolean existsById(ID id);
+List<T> findAll();
+long count();
+void deleteById(ID id);
+void delete(T entity);
+List<T> query(String sql, Object... params);
+CriteriaBuilder<T> criteria();
+SQLQueryBuilder sql();
+```
+
+### Custom Repository Methods
+
+Define custom methods by following the naming conventions described in [Query Methods](#query-methods):
+
+```java
+public interface ProductRepository extends Repository<Product, Long> {
+
+    List<Product> findAllByCategory(String category);
+
+    Optional<Product> findBySkuCode(String skuCode);
+
+    List<Product> findByPriceGreaterThan(BigDecimal price);
+
+    List<Product> findByNameContaining(String keyword);
+
+    List<Product> findByCategoryAndPriceLessThan(String category, BigDecimal maxPrice);
+
+    List<Product> findAllByIds(List<Long> ids);
+
+    List<Product> findByStockGreaterThanOrderByPriceAsc(int minStock);
+
+    long countByCategory(String category);
+
+    boolean existsBySkuCode(String skuCode);
+
+    void deleteByCategory(String category);
+}
+```
+
+---
+
+## Query Methods
+
+SwiftMapper generates SQL at runtime by parsing method names. The method name must follow the pattern:
+
+```
+{verb}{Top/N?}By{Conditions}{OrderBy?}
+```
+
+### Verbs
+
+| Verb | Returns | SQL |
+|---|---|---|
+| `find` | `Optional<T>` or `T` | `SELECT ... LIMIT 1` |
+| `findAll` | `List<T>` | `SELECT ...` |
+| `findFirst` | `Optional<T>` | `SELECT ... LIMIT 1` |
+| `findTop{N}` | `List<T>` | `SELECT ... LIMIT N` |
+| `count` | `long` | `SELECT COUNT(*)` |
+| `exists` | `boolean` | `SELECT 1` |
+| `delete` | `void` | `DELETE ...` |
+
+### Condition Keywords
+
+| Keyword | Example | SQL |
+|---|---|---|
+| *(none)* | `findByName(String name)` | `WHERE name = ?` |
+| `Equals` | `findByNameEquals(String name)` | `WHERE name = ?` |
+| `Not` / `NotEquals` / `Ne` | `findByNameNot(String name)` | `WHERE name <> ?` |
+| `GreaterThan` / `Gt` | `findByAgeGreaterThan(int age)` | `WHERE age > ?` |
+| `GreaterThanEquals` / `Gte` | `findByAgeGte(int age)` | `WHERE age >= ?` |
+| `LessThan` / `Lt` | `findByPriceLt(BigDecimal price)` | `WHERE price < ?` |
+| `LessThanEquals` / `Lte` | `findByPriceLte(BigDecimal price)` | `WHERE price <= ?` |
+| `Between` | `findByAgeBetween(int from, int to)` | `WHERE age BETWEEN ? AND ?` |
+| `Like` | `findByNameLike(String pattern)` | `WHERE name LIKE ?` |
+| `NotLike` | `findByNameNotLike(String pattern)` | `WHERE name NOT LIKE ?` |
+| `Containing` | `findByNameContaining(String s)` | `WHERE name LIKE '%s%'` |
+| `StartingWith` | `findByNameStartingWith(String s)` | `WHERE name LIKE 's%'` |
+| `EndingWith` | `findByNameEndingWith(String s)` | `WHERE name LIKE '%s'` |
+| `In` | `findByStatusIn(List<String> statuses)` | `WHERE status IN (...)` |
+| `NotIn` / `Nin` | `findByStatusNotIn(List<String> s)` | `WHERE status NOT IN (...)` |
+| `Ids` | `findAllByIds(List<Long> ids)` | `WHERE id IN (...)` |
+| `IsNull` / `Null` | `findByEmailNull()` | `WHERE email IS NULL` |
+| `IsNotNull` / `NotNull` | `findByEmailNotNull()` | `WHERE email IS NOT NULL` |
+| `True` | `findByActiveTrue()` | `WHERE active = true` |
+| `False` | `findByActiveFalse()` | `WHERE active = false` |
+| `Regex` | `findByNameRegex(String regex)` | `WHERE name ~ ?` |
+
+### Combining Conditions
+
+Use `And` and `Or` to combine multiple conditions:
+
+```java
+List<Car> findByBrandAndModel(String brand, String model);
+List<Car> findByBrandOrModel(String brand, String model);
+List<Car> findByBrandAndReleaseYearGreaterThan(String brand, int year);
+```
+
+### Sorting
+
+Append `OrderBy{Field}Asc` or `OrderBy{Field}Desc` at the end of the method name:
+
+```java
+List<Car> findByBrandOrderByModelAsc(String brand);
+List<Car> findAllByIds(List<Long> ids);
+```
+
+### Special: findAllByIds
+
+`findAllByIds` is a special keyword that maps to a bulk lookup by primary key using `IN`:
+
+```java
+List<Car> findAllByIds(List<Long> ids);
+// → SELECT t0.* FROM "cars" t0 WHERE t0."id" IN (?, ?, ...)
+```
+
+It also works with any other collection type (`List<Integer>`, `Set<UUID>`, etc.) or an array.
+
+### Return Type Rules
+
+| Declared return type | Behaviour |
+|---|---|
+| `List<T>` | Returns all matching rows |
+| `Optional<T>` | Adds `LIMIT 1`, wraps the first result |
+| `T` (entity directly) | Adds `LIMIT 1`, returns first result or throws |
+| `long` / `int` | Used with `count` verb |
+| `boolean` | Used with `exists` verb |
+| `void` | Used with `delete` verb |
+
+---
+
+## Criteria Builder API
+
+For complex dynamic queries, use the fluent `CriteriaBuilder<T>`:
+
+```java
+// Build and execute a query via repository
+CriteriaBuilder<Car> cb = carRepository.criteria();
+
+List<Car> results = cb
+        .equal("brand", "Toyota")
+        .greaterThan("releaseYear", 2015)
+        .like("model", "Camry%")
+        .orderByAsc("model")
+        .limit(10)
+        .offset(0)
+        .query((sql, params) -> carRepository.query(sql, params.toArray()));
+```
+
+### Available Criteria Methods
+
+```java
+cb.equal("field", value)
+cb.notEqual("field", value)
+cb.greaterThan("field", value)
+cb.greaterThanOrEqual("field", value)
+cb.lessThan("field", value)
+cb.lessThanOrEqual("field", value)
+cb.like("field", "pattern%")
+cb.in("field", List.of(v1, v2, v3))
+cb.isNull("field")
+cb.isNotNull("field")
+cb.orderByAsc("field")
+cb.orderByDesc("field")
+cb.limit(20)
+cb.offset(40)
+cb.page(2, 20)          // page(pageNumber, pageSize) — 1-indexed
+```
+
+### Building and inspecting the query
+
+```java
+CriteriaQuery<Car> query = cb.equal("brand", "BMW").limit(5).build();
+String sql     = query.sql();
+List<Object> p = query.params();
+List<Car> cars = carRepository.query(sql, p.toArray());
+
+CriteriaQuery<Car> countQuery = cb.buildCount();
+```
+
+### SQLQueryBuilder (low-level)
+
+For full SQL control, use `SQLQueryBuilder` directly:
+
+```java
+SQLQueryBuilder qb = carRepository.sql();
+BuiltQuery q = qb
+        .select("id", "brand", "model")
+        .where("brand", "Ford")
+        .and("release_year", ">", 2010)
+        .orderBy("model", "ASC")
+        .limit(50)
+        .build();
+
+List<Car> results = carRepository.query(q.getSql(), q.getParams().toArray());
+```
+
+---
+
+## Transaction Management
+
+### TransactionTemplate (recommended)
+
+```java
+TransactionTemplate tx = new TransactionTemplate(connectionManager);
+
+// Execute with result
+Car saved = tx.execute(conn -> {
+    // use conn directly or pass to a Session
+    return someDatabaseOperation(conn);
+});
+
+// Execute without result
+tx.executeWithoutResult(conn -> {
+    doWork1(conn);
+    doWork2(conn);
+});
+
+// Custom isolation level
+Car result = tx.executeWithIsolation(conn -> {
+    return sensitiveOperation(conn);
+}, Connection.TRANSACTION_SERIALIZABLE);
+```
+
+### Transaction (programmatic, fine-grained)
+
+```java
+Transaction tx = new Transaction(connectionManager);
+tx.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
+tx.begin();
+try {
+    // ... do work ...
+    tx.commit();
+} catch (Exception e) {
+    tx.rollback();
+    throw e;
+}
+```
+
+### Savepoints (nested transactions)
+
+```java
+Transaction tx = new Transaction(connectionManager);
+tx.begin();
+try {
+    doOuterWork(tx.getConnection());
+
+    tx.executeWithinSavepoint(() -> {
+        doInnerWork(tx.getConnection());
+        // if this throws, only the inner work is rolled back
+    });
+
+    tx.commit();
+} catch (Exception e) {
+    tx.rollback();
+}
+```
+
+### Retry with savepoints
+
+```java
+TransactionTemplate tx = new TransactionTemplate(connectionManager);
+tx.executeWithNestedSavepoints(conn -> {
+    // retried up to 3 times on transient (40xxx / 08xxx) SQL errors
+    doWork(conn);
+}, 3);
+```
+
+---
+
+## Caching
+
+SwiftMapper has a two-level cache:
+
+- **QueryCache** — caches result lists per SQL query (uses Caffeine by default)
+- **StatementCache** — caches `PreparedStatement` objects per connection
+
+### QueryCache Configuration
+
+```yaml
+swiftmapper:
+  cache:
+    enabled: true
+    max-size: 1000
+    expire-minutes: 10
+    provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
+```
+
+### Custom Cache Provider
+
+Implement `QueryCache.CacheProvider` and reference your class:
+
+```java
+public class RedisQueryCacheProvider implements QueryCache.CacheProvider {
+    @Override
+    public Cache<String, List<?>> createCache(long maxSize, long expireMinutes) {
+        // build and return a Redis-backed Caffeine or custom cache
+    }
+}
+```
+
+```yaml
+swiftmapper:
+  cache:
+    provider-class: com.example.RedisQueryCacheProvider
+```
+
+### Manual Cache Control
+
+```java
+QueryCache cache = session.getQueryCache();
+cache.invalidate("io.example.Car:findById:42");
+cache.invalidatePattern("io.example.Car:*");
+cache.invalidateAll();
+CacheStats stats = cache.getStats();
+```
+
+---
+
+## Lazy Loading
+
+SwiftMapper uses ByteBuddy to create proxy subclasses that defer relationship loading until a getter is first invoked.
+
+### How it works
+
+When an entity with a relationship field is loaded, SwiftMapper creates a proxy object. The first call to any getter or setter on that object triggers a database query to load the actual data. Subsequent calls use the already-loaded value.
+
+```java
+@Entity
+@Table(name = "orders")
+@Getter @Setter
+public class Order {
+    @Id
+    @GeneratedValue(strategy = Strategy.IDENTITY)
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "customer_id")
+    private Customer customer;           // loaded lazily on first access
+}
+```
+
+```java
+Order order = orderRepository.findById(1L).orElseThrow();
+// No customer query yet
+
+String name = order.getCustomer().getName();
+// NOW the customer is fetched from the database
+```
+
+### LazyList
+
+Collections are wrapped in `LazyList<E>`, which implements `java.util.List`. The list loads from the database the first time any of its methods is called.
+
+```java
+List<Order> orders = customer.getOrders();
+boolean alreadyLoaded = ((LazyList<Order>) orders).isLoaded();
+int count = orders.size();    // triggers load if not yet loaded
+```
+
+---
+
+## Schema Migrations
+
+SwiftMapper includes a simple versioned migration runner. Place `.sql` files in the configured location (default: `db/migrations` on the classpath).
+
+### File naming convention
+
+```
+V1__create_cars_table.sql
+V2__add_color_column.sql
+V3__create_customers_table.sql
+```
+
+Files are sorted by version number and executed in order. Each migration is recorded in an internal `swift_migrations` table. Migrations already executed are skipped on subsequent startups.
+
+### SQL file example
+
+```sql
+-- V1__create_cars_table.sql
+CREATE TABLE IF NOT EXISTS cars (
+    id      BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    brand   VARCHAR(100) NOT NULL,
+    model   VARCHAR(100) NOT NULL,
+    vin     VARCHAR(17)  NOT NULL UNIQUE
+);
+```
+
+### Disabling auto-migration
+
+Simply omit or leave blank the `migrations.location` property:
+
+```yaml
+swiftmapper:
+  migrations:
+    location:    # leave empty to skip
+```
+
+---
+
+## Relationship Mapping
+
+### @ManyToOne
+
+```java
+@Entity
+@Table(name = "orders")
+@Getter @Setter
+public class Order {
+    @Id
+    @GeneratedValue(strategy = Strategy.IDENTITY)
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "customer_id", referencedColumnName = "id")
+    private Customer customer;
+}
+```
+
+### @OneToMany
+
+```java
+@Entity
+@Table(name = "customers")
+@Getter @Setter
+public class Customer {
+    @Id
+    @GeneratedValue(strategy = Strategy.IDENTITY)
+    private Long id;
+
+    @OneToMany(mappedBy = "customer")
+    private List<Order> orders;
+}
+```
+
+### @ManyToMany
+
+```java
+@Entity
+@Table(name = "students")
+@Getter @Setter
+public class Student {
+    @Id
+    @GeneratedValue(strategy = Strategy.IDENTITY)
+    private Long id;
+
+    @ManyToMany
+    @JoinTable(
+        name = "student_courses",
+        joinColumn = "student_id",
+        inverseJoinColumn = "course_id"
+    )
+    private List<Course> courses;
+}
+```
+
+### @OneToOne
+
+```java
+@Entity
+@Table(name = "users")
+@Getter @Setter
+public class User {
+    @Id
+    @GeneratedValue(strategy = Strategy.IDENTITY)
+    private Long id;
+
+    @OneToOne
+    @JoinColumn(name = "profile_id")
+    private UserProfile profile;
+}
+```
+
+---
+
+## Validation
+
+Use validation annotations on entity fields. SwiftMapper validates entities before any `save` or `update` operation.
+
+```java
+@Entity
+@Table(name = "products")
+@Getter @Setter
+public class Product {
+    @Id
+    @GeneratedValue(strategy = Strategy.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    @NotBlank
+    private String name;
+
+    @Column(nullable = false)
+    @Min(0)
+    private BigDecimal price;
+
+    @Column
+    @Size(max = 500)
+    private String description;
+}
+```
+
+---
+
+## Spring Boot Integration
+
+### Configuration class
+
+```java
+@Configuration
+public class SwiftMapperConfig {
+
+    @Bean(destroyMethod = "close")
+    public SwiftMapperContext swiftMapperContext() throws Exception {
+        return SwiftMapperContext.fromConfig()
+                .initSchema(
+                        Car.class,
+                        Customer.class,
+                        Order.class
+                );
+    }
+
+    @Bean
+    public CarRepository carRepository(SwiftMapperContext ctx) {
+        return ctx.getRepository(CarRepository.class);
+    }
+
+    @Bean
+    public CustomerRepository customerRepository(SwiftMapperContext ctx) {
+        return ctx.getRepository(CustomerRepository.class);
+    }
+
+    @Bean
+    public OrderRepository orderRepository(SwiftMapperContext ctx) {
+        return ctx.getRepository(OrderRepository.class);
+    }
+}
+```
+
+All repository beans are then available for `@Autowired` / constructor injection anywhere in the application.
+
+---
+
+## Supported Databases
+
+| Database | Status | Notes |
+|---|---|---|
+| **PostgreSQL 12+** | Full support | Recommended; all features supported |
+| **H2 2.x** | Full support | Ideal for testing |
+| **MySQL 8+** | Partial | IDENTITY strategy requires `AUTO_INCREMENT` |
+| **MariaDB 10.6+** | Partial | Same as MySQL |
+
+---
+
+## FAQ
+
+**Q: Does SwiftMapper support `@Transactional` from Spring?**
+A: Not directly. Use `TransactionTemplate` or the raw `Transaction` class programmatically. Spring `@Transactional` integration is planned.
+
+**Q: Can I use SwiftMapper without Spring?**
+A: Yes. `SwiftMapperContext.fromConfig()` reads the config from the classpath without any Spring dependency. Create your repositories manually and inject them however you like.
+
+**Q: How do I run multiple queries in one transaction?**
+A: Use `TransactionTemplate.executeWithoutResult` or `Transaction.begin()` / `commit()` / `rollback()`. Pass the same `Connection` object to all operations.
+
+**Q: Does SwiftMapper support pagination?**
+A: Yes, via `CriteriaBuilder.page(pageNumber, pageSize)` or `limit(n).offset(m)`. Repository-level `Pageable` support is planned.
+
+**Q: Can I use custom SQL?**
+A: Yes. Use `repository.query(sql, params)` or `SQLQueryBuilder` for full control. SwiftMapper validates that your SQL starts with `SELECT` and does not contain dangerous patterns.
+
+**Q: How do I disable caching for a specific query?**
+A: Call `session.setCacheEnabled(false)` before executing the query, or invalidate specific keys via `session.getQueryCache().invalidate(key)`.

@@ -115,17 +115,34 @@ public class ConfigReader {
                 getString("swiftmapper.datasource.username"),
                 getString("swiftmapper.datasource.password"),
                 getString("swiftmapper.datasource.driver-class-name", "org.h2.Driver"),
-                getString("swiftmapper.migrations.location", "db/migrations")
+                getString("swiftmapper.migrations.location", "db/migrations"),
+                getString("swiftmapper.datasource.ddl-auto", "update")
         );
     }
 
     public LoggingConfig getLoggingConfig() {
+        String rawLevel = getString("swiftmapper.logging.level", "INFO");
+        String level = normalizeLoglevel(rawLevel);
         return new LoggingConfig(
-                getString("swiftmapper.logging.level", "INFO"),
+                level,
                 getBoolean("swiftmapper.logging.sql", true),
                 getBoolean("swiftmapper.logging.transactions", true),
                 getLong("swiftmapper.logging.slow-query-threshold", 1000)
         );
+    }
+
+    private static String normalizeLoglevel(String raw) {
+        if (raw == null) return "INFO";
+        return switch (raw.toLowerCase()) {
+            case "false", "off"  -> "OFF";
+            case "true"          -> "INFO";
+            case "trace"         -> "TRACE";
+            case "debug"         -> "DEBUG";
+            case "info"          -> "INFO";
+            case "warn"          -> "WARN";
+            case "error"         -> "ERROR";
+            default              -> raw.toUpperCase();
+        };
     }
 
     public CacheConfig getCacheConfig() {
