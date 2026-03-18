@@ -70,7 +70,8 @@ public class SwiftMapperAutoConfiguration implements BeanFactoryAware {
             for (BeanDefinition bd : scanner.findCandidateComponents(pkg)) {
                 String className = bd.getBeanClassName();
                 try {
-                    entities.add(Class.forName(className));
+                    entities.add(Class.forName(className, true,
+                            Thread.currentThread().getContextClassLoader()));
                     log.debug("Discovered @Entity: {}", className);
                 } catch (ClassNotFoundException e) {
                     log.warn("Could not load @Entity class: {}", className);

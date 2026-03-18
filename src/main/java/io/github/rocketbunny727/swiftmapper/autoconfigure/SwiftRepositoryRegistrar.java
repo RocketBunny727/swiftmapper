@@ -84,7 +84,8 @@ public class SwiftRepositoryRegistrar
             for (BeanDefinition bd : scanner.findCandidateComponents(pkg)) {
                 String className = bd.getBeanClassName();
                 try {
-                    Class<?> iface = Class.forName(className);
+                    Class<?> iface = Class.forName(className, true,
+                            Thread.currentThread().getContextClassLoader());
                     if (iface.isInterface() && Repository.class.isAssignableFrom(iface)) {
                         found.add(iface);
                         log.debug("Found @SwiftRepository: {}", className);
