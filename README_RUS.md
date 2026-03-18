@@ -1,9 +1,6 @@
 # SwiftMapper
 
-[![Build Status](https://github.com/rocketbunny/swiftmapper/workflows/Java%20CI/badge.svg)](https://github.com/rocketbunny/swiftmapper/actions)
-[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rocketbunny/swiftmapper/main/.github/badges/jacoco.json)](https://github.com/rocketbunny/swiftmapper/actions)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.rocketbunny727/swiftmapper.svg)](https://central.sonatype.com/artifact/io.github.rocketbunny727/swiftmapper)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 *Читать на других языках: [English](README.md)*
 
@@ -30,7 +27,6 @@
 - [Валидация](#валидация)
 - [Интеграция со Spring Boot](#интеграция-со-spring-boot)
 - [Поддерживаемые базы данных](#поддерживаемые-базы-данных)
-- [Часто задаваемые вопросы](#часто-задаваемые-вопросы)
 
 ---
 
@@ -44,9 +40,10 @@
 - **Criteria API** — типобезопасное построение запросов через fluent-интерфейс
 - **Поддержка транзакций** — программное и декларативное управление с поддержкой вложенных savepoint
 - **Валидация** — проверка данных через аннотации
-- **Автогенерация схемы** — автоматическое создание DDL из классов сущностей
+- **Автогенерация схемы** — автоматическое создание DDL из классов сущностей с режимами `ddl-auto`
 - **Миграции базы данных** — запуск версионированных SQL-миграций
 - **Кэш PreparedStatement** — кэширование подготовленных запросов на уровне соединения
+- **Красивый вывод SQL** — форматированный и подсвеченный вывод запросов через `showSQL()`
 
 ---
 
@@ -54,6 +51,7 @@
 
 - Java 17 или новее
 - Maven 3.6+ или Gradle 7+
+- Spring Boot 3.x / 4.x
 - Поддерживаемая база данных (PostgreSQL, H2, MySQL — см. [Поддерживаемые базы данных](#поддерживаемые-базы-данных))
 
 ---
@@ -104,30 +102,49 @@ swiftmapper:
     username: postgres
     password: secret
     driver-class-name: org.postgresql.Driver
+    ddl-auto: update          # none | update | create | create-drop | validate
 
   migrations:
-    location: db/migrations        # папка на classpath с .sql-файлами миграций
+    location: db/migrations   # папка на classpath с .sql-файлами миграций
 
   logging:
-    level: DEBUG                   # OFF, ERROR, WARN, INFO, DEBUG
-    sql: true                      # логировать каждый сгенерированный SQL
-    transactions: true             # логировать begin/commit/rollback
-    slow-query-threshold: 1000     # мс; запросы медленнее этого порога дают предупреждение
+    level: "INFO"             # TRACE | DEBUG | INFO | WARN | ERROR | OFF
+    sql: true                 # красивый вывод каждого SQL через showSQL()
+    transactions: true        # логировать begin/commit/rollback
+    slow-query-threshold: 1000  # мс; запросы медленнее этого порога дают WARN
 
   cache:
     enabled: true
-    max-size: 1000                 # максимальное число кэшированных результатов
-    expire-minutes: 10             # TTL кэш-записей
-    provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
+    max-size: 1000            # максимальное число кэшированных результатов
+    expire-minutes: 10        # TTL кэш-записей
+    provider-class: io.github.rocketbunny727.swiftmapper.cache.QueryCache$CaffeineCacheProvider
 
   pool:
-    max-size: 10                   # максимальное число соединений в пуле
-    min-idle: 5                    # минимальное число простаивающих соединений
-    connection-timeout: 30000      # мс ожидания свободного соединения
-    idle-timeout: 600000           # мс до вытеснения простаивающего соединения
-    max-lifetime: 1800000          # мс до принудительного закрытия соединения
-    leak-detection-threshold: 60000 # мс; предупреждение, если соединение держится дольше
+    max-size: 10              # максимальное число соединений в пуле
+    min-idle: 5               # минимальное число простаивающих соединений
+    connection-timeout: 30000   # мс ожидания свободного соединения
+    idle-timeout: 600000        # мс до вытеснения простаивающего соединения
+    max-lifetime: 1800000       # мс до принудительного закрытия соединения
+    leak-detection-threshold: 60000  # мс; предупреждение, если соединение держится дольше
 ```
+
+> **⚠️ Особенность парсинга YAML**: SnakeYAML интерпретирует `OFF`, `ON`, `YES`, `NO` как булевы значения.
+> Всегда берите уровень логирования в кавычки:
+> ```yaml
+> logging:
+>   level: "OFF"   # ✅ правильно
+>   level: OFF     # ❌ парсится как false — уровень будет проигнорирован
+> ```
+
+### Режимы ddl-auto
+
+| Значение | Поведение |
+|---|---|
+| `none` | Ничего не делать — схема управляется вручную |
+| `update` | `CREATE TABLE IF NOT EXISTS` при запуске (по умолчанию) |
+| `create` | Дропнуть и пересоздать все таблицы при каждом запуске |
+| `create-drop` | Создать при запуске, дропнуть при завершении |
+| `validate` | Проверить наличие таблиц; бросить исключение если какой-то нет |
 
 ### application.properties (эквивалент)
 
@@ -136,8 +153,9 @@ swiftmapper.datasource.url=jdbc:postgresql://localhost:5432/mydb
 swiftmapper.datasource.username=postgres
 swiftmapper.datasource.password=secret
 swiftmapper.datasource.driver-class-name=org.postgresql.Driver
+swiftmapper.datasource.ddl-auto=update
 swiftmapper.migrations.location=db/migrations
-swiftmapper.logging.level=DEBUG
+swiftmapper.logging.level=INFO
 swiftmapper.logging.sql=true
 swiftmapper.logging.transactions=true
 swiftmapper.logging.slow-query-threshold=1000
@@ -185,7 +203,10 @@ public class Car {
 
 ### 2. Создайте интерфейс репозитория
 
+Аннотируйте его `@SwiftRepository` — авто-конфигурация Spring Boot зарегистрирует его автоматически:
+
 ```java
+@SwiftRepository
 public interface CarRepository extends Repository<Car, Long> {
     List<Car> findAllByBrand(String brand);
     Optional<Car> findByVin(String vin);
@@ -198,26 +219,9 @@ public interface CarRepository extends Repository<Car, Long> {
 }
 ```
 
-### 3. Инициализируйте контекст
+### 3. Используйте репозиторий
 
-```java
-@Configuration
-public class SwiftMapperConfig {
-
-    @Bean(destroyMethod = "close")
-    public SwiftMapperContext swiftMapperContext() throws Exception {
-        return SwiftMapperContext.fromConfig()
-                .initSchema(Car.class);
-    }
-
-    @Bean
-    public CarRepository carRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(CarRepository.class);
-    }
-}
-```
-
-### 4. Используйте репозиторий
+При использовании авто-конфигурации Spring Boot все `@SwiftRepository`-интерфейсы и `@Entity`-классы обнаруживаются автоматически — никаких ручных объявлений `@Bean` не требуется:
 
 ```java
 @Service
@@ -293,7 +297,7 @@ private Long id;
 
 // Строковый префикс + счётчик последовательности (например, "CAR_1001")
 @Id
-@GeneratedValue(strategy = Strategy.PATTERN, prefix = "CAR_", startValue = 1000)
+@GeneratedValue(strategy = Strategy.PATTERN, pattern = "CAR_", startValue = 1000)
 private String id;
 
 // Автоматический алфанумерический ID
@@ -303,8 +307,6 @@ private Long id;
 ```
 
 ### Поддерживаемые Java-типы
-
-SwiftMapper автоматически маппит следующие Java-типы на SQL:
 
 | Java-тип | SQL-тип |
 |---|---|
@@ -345,9 +347,10 @@ SQLQueryBuilder sql();
 
 ### Пользовательские методы репозитория
 
-Объявляйте методы, следуя соглашениям об именовании из раздела [Query-методы](#query-методы):
+Аннотируйте интерфейс `@SwiftRepository` и объявляйте методы по соглашениям из раздела [Query-методы](#query-методы):
 
 ```java
+@SwiftRepository
 public interface ProductRepository extends Repository<Product, Long> {
 
     List<Product> findAllByCategory(String category);
@@ -461,6 +464,8 @@ List<Car> findAllByIds(List<Long> ids);
 | `boolean` | Используется с глаголом `exists` |
 | `void` | Используется с глаголом `delete` |
 
+> **Примечание о именах полей**: поля, в названии которых встречаются SQL-ключевые слова как подстроки (например, `brand` содержит `AND`, `score` содержит `OR`) обрабатываются корректно. Валидатор использует строгое регулярное выражение, а не поиск подстроки.
+
 ---
 
 ## Criteria Builder API
@@ -497,7 +502,7 @@ cb.orderByAsc("field")
 cb.orderByDesc("field")
 cb.limit(20)
 cb.offset(40)
-cb.page(2, 20)          // page(номерСтраницы, размерСтраницы) — нумерация с 1
+cb.page(2, 20)    // page(номерСтраницы, размерСтраницы) — нумерация с 1
 ```
 
 ### Построение и инспекция запроса
@@ -530,7 +535,45 @@ List<Car> results = carRepository.query(q.getSql(), q.getParams().toArray());
 
 ## Управление транзакциями
 
-### TransactionTemplate (рекомендуется)
+### @SwiftTransactional (декларативный, только Spring Boot)
+
+```java
+@Service
+public class OrderService {
+
+    @SwiftTransactional
+    public Order createOrder(OrderDto dto) {
+        // весь метод выполняется в одной транзакции
+        Order order = orderRepository.save(dto.toModel());
+        inventoryRepository.decreaseStock(dto.getProductId());
+        return order;
+    }
+
+    @SwiftTransactional(propagation = Propagation.REQUIRES_NEW,
+                        isolation = Connection.TRANSACTION_SERIALIZABLE,
+                        readOnly = true)
+    public List<Order> getOrders() {
+        return orderRepository.findAll();
+    }
+
+    @SwiftTransactional(rollbackFor = { PaymentException.class },
+                        noRollbackFor = { NotFoundException.class })
+    public void processPayment(PaymentDto dto) { ... }
+}
+```
+
+#### Режимы распространения (Propagation)
+
+| Режим | Поведение |
+|---|---|
+| `REQUIRED` | Присоединиться к существующей транзакции или создать новую (по умолчанию) |
+| `REQUIRES_NEW` | Всегда создавать новую независимую транзакцию |
+| `SUPPORTS` | Использовать существующую транзакцию если есть, иначе без транзакции |
+| `MANDATORY` | Должен выполняться в существующей транзакции; бросает исключение если её нет |
+| `NOT_SUPPORTED` | Всегда выполняться без транзакции |
+| `NEVER` | Не должен выполняться в транзакции; бросает исключение если она активна |
+
+### TransactionTemplate (программный, рекомендуется)
 
 ```java
 TransactionTemplate tx = new TransactionTemplate(connectionManager);
@@ -613,7 +656,7 @@ swiftmapper:
     enabled: true
     max-size: 1000
     expire-minutes: 10
-    provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
+    provider-class: io.github.rocketbunny727.swiftmapper.cache.QueryCache$CaffeineCacheProvider
 ```
 
 ### Пользовательский провайдер кэша
@@ -653,7 +696,7 @@ SwiftMapper использует ByteBuddy для создания прокси-
 
 ### Принцип работы
 
-При загрузке сущности со связными полями SwiftMapper создаёт прокси-объект. Первый вызов любого геттера или сеттера на этом объекте инициирует запрос к базе данных. Последующие вызовы используют уже загруженное значение.
+При загрузке сущности со связными полями SwiftMapper создаёт прокси-объект. Первый вызов любого геттера или сеттера инициирует запрос к базе данных. Последующие вызовы используют уже загруженное значение.
 
 ```java
 @Entity
@@ -666,7 +709,7 @@ public class Order {
 
     @ManyToOne
     @JoinColumn(name = "customer_id")
-    private Customer customer;           // загружается лениво при первом обращении
+    private Customer customer;    // загружается лениво при первом обращении
 }
 ```
 
@@ -718,12 +761,14 @@ CREATE TABLE IF NOT EXISTS cars (
 
 ### Отключение автомиграций
 
-Оставьте `migrations.location` пустым или не указывайте его:
+Оставьте `migrations.location` пустым или установите `ddl-auto: none`:
 
 ```yaml
 swiftmapper:
   migrations:
-    location:    # оставьте пустым для пропуска
+    location:         # оставьте пустым для пропуска
+  datasource:
+    ddl-auto: none    # отключить генерацию схемы полностью
 ```
 
 ---
@@ -834,40 +879,50 @@ public class Product {
 
 ## Интеграция со Spring Boot
 
-### Конфигурационный класс
+SwiftMapper интегрируется со Spring Boot через авто-конфигурацию. Для типичного случая никаких ручных объявлений `@Bean` не требуется.
+
+### Принцип работы
+
+1. SwiftMapper регистрирует авто-конфигурацию через `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
+2. `SwiftMapperAutoConfiguration` сканирует `@Entity`-классы в пакетах вашего приложения и инициализирует схему согласно `ddl-auto`.
+3. `SwiftRepositoryRegistrar` сканирует интерфейсы с аннотацией `@SwiftRepository` и регистрирует для каждого `FactoryBean`, делая их доступными для инъекции.
+
+### Минимальная настройка
+
+Всё что нужно — корректный `application.yml` и аннотированные сущности с репозиториями:
 
 ```java
-@Configuration
-public class SwiftMapperConfig {
+// Сущность — обнаруживается автоматически
+@Entity
+@Table(name = "cars")
+public class Car { ... }
 
-    @Bean(destroyMethod = "close")
-    public SwiftMapperContext swiftMapperContext() throws Exception {
-        return SwiftMapperContext.fromConfig()
-                .initSchema(
-                        Car.class,
-                        Customer.class,
-                        Order.class
-                );
-    }
+// Репозиторий — аннотируйте @SwiftRepository для авто-регистрации
+@SwiftRepository
+public interface CarRepository extends Repository<Car, Long> { ... }
 
-    @Bean
-    public CarRepository carRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(CarRepository.class);
-    }
-
-    @Bean
-    public CustomerRepository customerRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(CustomerRepository.class);
-    }
-
-    @Bean
-    public OrderRepository orderRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(OrderRepository.class);
-    }
+// Сервис — инжектируйте напрямую
+@Service
+@RequiredArgsConstructor
+public class CarService {
+    private final CarRepository carRepository;
 }
 ```
 
-Все бины репозиториев после этого доступны для `@Autowired` / инжекции через конструктор в любом месте приложения.
+### Ручной контекст (без Spring Boot)
+
+Если авто-конфигурация Spring Boot не используется, создайте контекст вручную:
+
+```java
+SwiftMapperContext ctx = SwiftMapperContext.fromConfig()
+        .initSchema(Car.class, Customer.class, Order.class);
+
+CarRepository carRepo       = ctx.getRepository(CarRepository.class);
+CustomerRepository custRepo = ctx.getRepository(CustomerRepository.class);
+
+// при завершении работы
+ctx.close();
+```
 
 ---
 
@@ -880,24 +935,3 @@ public class SwiftMapperConfig {
 | **MySQL 8+** | Частичная | Стратегия IDENTITY требует `AUTO_INCREMENT` |
 | **MariaDB 10.6+** | Частичная | Аналогично MySQL |
 
----
-
-## Часто задаваемые вопросы
-
-**В: Поддерживает ли SwiftMapper `@Transactional` из Spring?**
-О: Нет, напрямую не поддерживается. Используйте `TransactionTemplate` или класс `Transaction` программно. Интеграция со Spring `@Transactional` запланирована.
-
-**В: Можно ли использовать SwiftMapper без Spring?**
-О: Да. `SwiftMapperContext.fromConfig()` читает конфигурацию из classpath без каких-либо зависимостей от Spring. Создайте репозитории вручную и внедряйте их любым удобным способом.
-
-**В: Как выполнить несколько запросов в одной транзакции?**
-О: Используйте `TransactionTemplate.executeWithoutResult` или `Transaction.begin()` / `commit()` / `rollback()`. Передавайте один и тот же объект `Connection` во все операции.
-
-**В: Поддерживает ли SwiftMapper постраничную навигацию?**
-О: Да, через `CriteriaBuilder.page(pageNumber, pageSize)` или `limit(n).offset(m)`. Поддержка `Pageable` на уровне репозитория запланирована.
-
-**В: Можно ли использовать произвольный SQL?**
-О: Да. Используйте `repository.query(sql, params)` или `SQLQueryBuilder` для полного контроля. SwiftMapper проверяет, что SQL начинается с `SELECT` и не содержит опасных паттернов.
-
-**В: Как отключить кэш для конкретного запроса?**
-О: Вызовите `session.setCacheEnabled(false)` перед выполнением запроса или инвалидируйте конкретные ключи через `session.getQueryCache().invalidate(key)`.

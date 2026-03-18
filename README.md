@@ -1,9 +1,6 @@
 # SwiftMapper
 
-[![Build Status](https://github.com/rocketbunny/swiftmapper/workflows/Java%20CI/badge.svg)](https://github.com/rocketbunny/swiftmapper/actions)
-[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rocketbunny/swiftmapper/main/.github/badges/jacoco.json)](https://github.com/rocketbunny/swiftmapper/actions)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.rocketbunny727/swiftmapper.svg)](https://central.sonatype.com/artifact/io.github.rocketbunny727/swiftmapper)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 *Read this in other languages: [Русский](README_RUS.md)*
 
@@ -30,7 +27,6 @@
 - [Validation](#validation)
 - [Spring Boot Integration](#spring-boot-integration)
 - [Supported Databases](#supported-databases)
-- [FAQ](#faq)
 
 ---
 
@@ -44,9 +40,10 @@
 - **Criteria API** — Type-safe programmatic query building with a fluent API
 - **Transaction Support** — Programmatic and declarative transaction management with savepoint nesting
 - **Validation** — Bean validation with custom annotations
-- **Auto Schema Generation** — Automatic DDL creation from entity classes
+- **Auto Schema Generation** — Automatic DDL creation from entity classes with `ddl-auto` modes
 - **Database Migrations** — Versioned SQL migration runner
 - **Statement Cache** — Per-connection prepared statement caching
+- **Pretty SQL Logging** — Formatted, syntax-highlighted SQL output via `showSQL()`
 
 ---
 
@@ -54,6 +51,7 @@
 
 - Java 17 or later
 - Maven 3.6+ or Gradle 7+
+- Spring Boot 3.x / 4.x
 - Supported database (PostgreSQL, H2, MySQL — see [Supported Databases](#supported-databases))
 
 ---
@@ -104,30 +102,49 @@ swiftmapper:
     username: postgres
     password: secret
     driver-class-name: org.postgresql.Driver
+    ddl-auto: update          # none | update | create | create-drop | validate
 
   migrations:
-    location: db/migrations        # classpath folder with .sql migration files
+    location: db/migrations   # classpath folder with .sql migration files
 
   logging:
-    level: DEBUG                   # OFF, ERROR, WARN, INFO, DEBUG
-    sql: true                      # log every generated SQL statement
-    transactions: true             # log transaction begin/commit/rollback
-    slow-query-threshold: 1000     # milliseconds; queries slower than this are warned
+    level: "INFO"             # TRACE | DEBUG | INFO | WARN | ERROR | OFF
+    sql: true                 # pretty-print every SQL statement via showSQL()
+    transactions: true        # log transaction begin/commit/rollback
+    slow-query-threshold: 1000  # ms; queries slower than this emit a WARN
 
   cache:
     enabled: true
-    max-size: 1000                 # maximum number of cached query results
-    expire-minutes: 10             # TTL for cached entries
-    provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
+    max-size: 1000            # maximum number of cached query results
+    expire-minutes: 10        # TTL for cached entries
+    provider-class: io.github.rocketbunny727.swiftmapper.cache.QueryCache$CaffeineCacheProvider
 
   pool:
-    max-size: 10                   # maximum pool connections
-    min-idle: 5                    # minimum idle connections to keep
-    connection-timeout: 30000      # ms to wait for a free connection
-    idle-timeout: 600000           # ms before an idle connection is evicted
-    max-lifetime: 1800000          # ms before a connection is forcibly retired
-    leak-detection-threshold: 60000 # ms; log a warning if a connection is held longer
+    max-size: 10              # maximum pool connections
+    min-idle: 5               # minimum idle connections to keep
+    connection-timeout: 30000   # ms to wait for a free connection
+    idle-timeout: 600000        # ms before an idle connection is evicted
+    max-lifetime: 1800000       # ms before a connection is forcibly retired
+    leak-detection-threshold: 60000  # ms; warn if a connection is held longer
 ```
+
+> **⚠️ YAML boolean pitfall**: SnakeYAML parses `OFF`, `ON`, `YES`, `NO` as boolean values.
+> Always quote the logging level when using these values:
+> ```yaml
+> logging:
+>   level: "OFF"   # ✅ correct
+>   level: OFF     # ❌ parsed as false — level will be ignored
+> ```
+
+### ddl-auto modes
+
+| Value | Behaviour |
+|---|---|
+| `none` | Do nothing — schema must be managed manually |
+| `update` | `CREATE TABLE IF NOT EXISTS` on startup (default) |
+| `create` | Drop and recreate all tables on every startup |
+| `create-drop` | Create on startup, drop on shutdown |
+| `validate` | Verify that tables exist; throw if any are missing |
 
 ### application.properties (equivalent)
 
@@ -136,8 +153,9 @@ swiftmapper.datasource.url=jdbc:postgresql://localhost:5432/mydb
 swiftmapper.datasource.username=postgres
 swiftmapper.datasource.password=secret
 swiftmapper.datasource.driver-class-name=org.postgresql.Driver
+swiftmapper.datasource.ddl-auto=update
 swiftmapper.migrations.location=db/migrations
-swiftmapper.logging.level=DEBUG
+swiftmapper.logging.level=INFO
 swiftmapper.logging.sql=true
 swiftmapper.logging.transactions=true
 swiftmapper.logging.slow-query-threshold=1000
@@ -185,7 +203,10 @@ public class Car {
 
 ### 2. Create a Repository Interface
 
+Annotate it with `@SwiftRepository` so Spring Boot auto-configuration picks it up automatically:
+
 ```java
+@SwiftRepository
 public interface CarRepository extends Repository<Car, Long> {
     List<Car> findAllByBrand(String brand);
     Optional<Car> findByVin(String vin);
@@ -198,26 +219,9 @@ public interface CarRepository extends Repository<Car, Long> {
 }
 ```
 
-### 3. Initialize the Context
+### 3. Use the Repository
 
-```java
-@Configuration
-public class SwiftMapperConfig {
-
-    @Bean(destroyMethod = "close")
-    public SwiftMapperContext swiftMapperContext() throws Exception {
-        return SwiftMapperContext.fromConfig()
-                .initSchema(Car.class);
-    }
-
-    @Bean
-    public CarRepository carRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(CarRepository.class);
-    }
-}
-```
-
-### 4. Use the Repository
+With Spring Boot auto-configuration, all `@SwiftRepository` interfaces and `@Entity` classes are discovered automatically — no manual `@Bean` definitions needed:
 
 ```java
 @Service
@@ -293,7 +297,7 @@ private Long id;
 
 // String prefix + sequence counter (e.g. "CAR_1001")
 @Id
-@GeneratedValue(strategy = Strategy.PATTERN, prefix = "CAR_", startValue = 1000)
+@GeneratedValue(strategy = Strategy.PATTERN, pattern = "CAR_", startValue = 1000)
 private String id;
 
 // Auto alpha-numeric ID
@@ -303,8 +307,6 @@ private Long id;
 ```
 
 ### Supported Java Types
-
-SwiftMapper automatically maps these Java types to SQL:
 
 | Java Type | SQL Type |
 |---|---|
@@ -345,9 +347,10 @@ SQLQueryBuilder sql();
 
 ### Custom Repository Methods
 
-Define custom methods by following the naming conventions described in [Query Methods](#query-methods):
+Annotate the interface with `@SwiftRepository` and define methods following the naming conventions in [Query Methods](#query-methods):
 
 ```java
+@SwiftRepository
 public interface ProductRepository extends Repository<Product, Long> {
 
     List<Product> findAllByCategory(String category);
@@ -436,19 +439,19 @@ Append `OrderBy{Field}Asc` or `OrderBy{Field}Desc` at the end of the method name
 
 ```java
 List<Car> findByBrandOrderByModelAsc(String brand);
-List<Car> findAllByIds(List<Long> ids);
+List<Car> findAllOrderByReleaseYearDesc();
 ```
 
 ### Special: findAllByIds
 
-`findAllByIds` is a special keyword that maps to a bulk lookup by primary key using `IN`:
+`findAllByIds` maps to a bulk lookup by primary key using `IN`:
 
 ```java
 List<Car> findAllByIds(List<Long> ids);
 // → SELECT t0.* FROM "cars" t0 WHERE t0."id" IN (?, ?, ...)
 ```
 
-It also works with any other collection type (`List<Integer>`, `Set<UUID>`, etc.) or an array.
+Works with any collection type (`List<Integer>`, `Set<UUID>`, etc.) or an array.
 
 ### Return Type Rules
 
@@ -461,6 +464,8 @@ It also works with any other collection type (`List<Integer>`, `Set<UUID>`, etc.
 | `boolean` | Used with `exists` verb |
 | `void` | Used with `delete` verb |
 
+> **Note on property names**: field names containing SQL keywords as substrings (e.g. `brand` contains `AND`, `score` contains `OR`) are handled correctly. The parser validates property names using a strict alphanumeric regex, not substring matching.
+
 ---
 
 ## Criteria Builder API
@@ -468,7 +473,6 @@ It also works with any other collection type (`List<Integer>`, `Set<UUID>`, etc.
 For complex dynamic queries, use the fluent `CriteriaBuilder<T>`:
 
 ```java
-// Build and execute a query via repository
 CriteriaBuilder<Car> cb = carRepository.criteria();
 
 List<Car> results = cb
@@ -498,7 +502,7 @@ cb.orderByAsc("field")
 cb.orderByDesc("field")
 cb.limit(20)
 cb.offset(40)
-cb.page(2, 20)          // page(pageNumber, pageSize) — 1-indexed
+cb.page(2, 20)    // page(pageNumber, pageSize) — 1-indexed
 ```
 
 ### Building and inspecting the query
@@ -513,8 +517,6 @@ CriteriaQuery<Car> countQuery = cb.buildCount();
 ```
 
 ### SQLQueryBuilder (low-level)
-
-For full SQL control, use `SQLQueryBuilder` directly:
 
 ```java
 SQLQueryBuilder qb = carRepository.sql();
@@ -533,14 +535,51 @@ List<Car> results = carRepository.query(q.getSql(), q.getParams().toArray());
 
 ## Transaction Management
 
-### TransactionTemplate (recommended)
+### @SwiftTransactional (declarative, Spring Boot only)
+
+```java
+@Service
+public class OrderService {
+
+    @SwiftTransactional
+    public Order createOrder(OrderDto dto) {
+        // entire method runs in a single transaction
+        Order order = orderRepository.save(dto.toModel());
+        inventoryRepository.decreaseStock(dto.getProductId());
+        return order;
+    }
+
+    @SwiftTransactional(propagation = Propagation.REQUIRES_NEW,
+                        isolation = Connection.TRANSACTION_SERIALIZABLE,
+                        readOnly = true)
+    public List<Order> getOrders() {
+        return orderRepository.findAll();
+    }
+
+    @SwiftTransactional(rollbackFor = { PaymentException.class },
+                        noRollbackFor = { NotFoundException.class })
+    public void processPayment(PaymentDto dto) { ... }
+}
+```
+
+#### Propagation modes
+
+| Mode | Behaviour |
+|---|---|
+| `REQUIRED` | Join existing transaction or start a new one (default) |
+| `REQUIRES_NEW` | Always start a new independent transaction |
+| `SUPPORTS` | Use existing transaction if present, otherwise non-transactional |
+| `MANDATORY` | Must run within an existing transaction; throws if none |
+| `NOT_SUPPORTED` | Always run non-transactionally |
+| `NEVER` | Must not run within a transaction; throws if one is active |
+
+### TransactionTemplate (programmatic, recommended)
 
 ```java
 TransactionTemplate tx = new TransactionTemplate(connectionManager);
 
 // Execute with result
 Car saved = tx.execute(conn -> {
-    // use conn directly or pass to a Session
     return someDatabaseOperation(conn);
 });
 
@@ -556,7 +595,7 @@ Car result = tx.executeWithIsolation(conn -> {
 }, Connection.TRANSACTION_SERIALIZABLE);
 ```
 
-### Transaction (programmatic, fine-grained)
+### Transaction (fine-grained, manual)
 
 ```java
 Transaction tx = new Transaction(connectionManager);
@@ -617,7 +656,7 @@ swiftmapper:
     enabled: true
     max-size: 1000
     expire-minutes: 10
-    provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
+    provider-class: io.github.rocketbunny727.swiftmapper.cache.QueryCache$CaffeineCacheProvider
 ```
 
 ### Custom Cache Provider
@@ -628,7 +667,7 @@ Implement `QueryCache.CacheProvider` and reference your class:
 public class RedisQueryCacheProvider implements QueryCache.CacheProvider {
     @Override
     public Cache<String, List<?>> createCache(long maxSize, long expireMinutes) {
-        // build and return a Redis-backed Caffeine or custom cache
+        // build and return a Redis-backed or custom cache
     }
 }
 ```
@@ -670,7 +709,7 @@ public class Order {
 
     @ManyToOne
     @JoinColumn(name = "customer_id")
-    private Customer customer;           // loaded lazily on first access
+    private Customer customer;    // loaded lazily on first access
 }
 ```
 
@@ -706,7 +745,7 @@ V2__add_color_column.sql
 V3__create_customers_table.sql
 ```
 
-Files are sorted by version number and executed in order. Each migration is recorded in an internal `swift_migrations` table. Migrations already executed are skipped on subsequent startups.
+Files are sorted by version number and executed in order. Each migration is recorded in an internal `swift_migrations` table. Already-executed migrations are skipped on subsequent startups.
 
 ### SQL file example
 
@@ -722,12 +761,14 @@ CREATE TABLE IF NOT EXISTS cars (
 
 ### Disabling auto-migration
 
-Simply omit or leave blank the `migrations.location` property:
+Leave `migrations.location` blank or set `ddl-auto: none`:
 
 ```yaml
 swiftmapper:
   migrations:
-    location:    # leave empty to skip
+    location:       # leave empty to skip
+  datasource:
+    ddl-auto: none  # skip schema generation entirely
 ```
 
 ---
@@ -838,40 +879,50 @@ public class Product {
 
 ## Spring Boot Integration
 
-### Configuration class
+SwiftMapper integrates with Spring Boot via auto-configuration. No manual `@Bean` definitions are required for the common case.
+
+### How it works
+
+1. SwiftMapper registers its auto-configuration via `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
+2. `SwiftMapperAutoConfiguration` scans for `@Entity` classes in your application packages and initialises the schema according to `ddl-auto`.
+3. `SwiftRepositoryRegistrar` scans for interfaces annotated with `@SwiftRepository` and registers a `FactoryBean` for each one, making them available for injection.
+
+### Minimal setup
+
+All you need is a valid `application.yml` and your annotated entities and repositories:
 
 ```java
-@Configuration
-public class SwiftMapperConfig {
+// Entity — discovered automatically
+@Entity
+@Table(name = "cars")
+public class Car { ... }
 
-    @Bean(destroyMethod = "close")
-    public SwiftMapperContext swiftMapperContext() throws Exception {
-        return SwiftMapperContext.fromConfig()
-                .initSchema(
-                        Car.class,
-                        Customer.class,
-                        Order.class
-                );
-    }
+// Repository — annotate with @SwiftRepository for auto-registration
+@SwiftRepository
+public interface CarRepository extends Repository<Car, Long> { ... }
 
-    @Bean
-    public CarRepository carRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(CarRepository.class);
-    }
-
-    @Bean
-    public CustomerRepository customerRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(CustomerRepository.class);
-    }
-
-    @Bean
-    public OrderRepository orderRepository(SwiftMapperContext ctx) {
-        return ctx.getRepository(OrderRepository.class);
-    }
+// Service — inject directly
+@Service
+@RequiredArgsConstructor
+public class CarService {
+    private final CarRepository carRepository;
 }
 ```
 
-All repository beans are then available for `@Autowired` / constructor injection anywhere in the application.
+### Manual context (without Spring Boot)
+
+If you are not using Spring Boot auto-configuration, create the context manually:
+
+```java
+SwiftMapperContext ctx = SwiftMapperContext.fromConfig()
+        .initSchema(Car.class, Customer.class, Order.class);
+
+CarRepository carRepo      = ctx.getRepository(CarRepository.class);
+CustomerRepository custRepo = ctx.getRepository(CustomerRepository.class);
+
+// when shutting down
+ctx.close();
+```
 
 ---
 
@@ -884,24 +935,3 @@ All repository beans are then available for `@Autowired` / constructor injection
 | **MySQL 8+** | Partial | IDENTITY strategy requires `AUTO_INCREMENT` |
 | **MariaDB 10.6+** | Partial | Same as MySQL |
 
----
-
-## FAQ
-
-**Q: Does SwiftMapper support `@Transactional` from Spring?**
-A: Not directly. Use `TransactionTemplate` or the raw `Transaction` class programmatically. Spring `@Transactional` integration is planned.
-
-**Q: Can I use SwiftMapper without Spring?**
-A: Yes. `SwiftMapperContext.fromConfig()` reads the config from the classpath without any Spring dependency. Create your repositories manually and inject them however you like.
-
-**Q: How do I run multiple queries in one transaction?**
-A: Use `TransactionTemplate.executeWithoutResult` or `Transaction.begin()` / `commit()` / `rollback()`. Pass the same `Connection` object to all operations.
-
-**Q: Does SwiftMapper support pagination?**
-A: Yes, via `CriteriaBuilder.page(pageNumber, pageSize)` or `limit(n).offset(m)`. Repository-level `Pageable` support is planned.
-
-**Q: Can I use custom SQL?**
-A: Yes. Use `repository.query(sql, params)` or `SQLQueryBuilder` for full control. SwiftMapper validates that your SQL starts with `SELECT` and does not contain dangerous patterns.
-
-**Q: How do I disable caching for a specific query?**
-A: Call `session.setCacheEnabled(false)` before executing the query, or invalidate specific keys via `session.getQueryCache().invalidate(key)`.
