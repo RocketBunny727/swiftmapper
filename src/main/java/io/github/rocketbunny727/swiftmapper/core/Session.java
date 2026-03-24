@@ -505,7 +505,6 @@ public class Session<T> {
             GeneratedValue gen = getGeneratedValue(idField);
 
             if (gen != null && (gen.strategy() == Strategy.SEQUENCE ||
-                    gen.strategy() == Strategy.ALPHA ||
                     gen.strategy() == Strategy.PATTERN)) {
                 for (Object entity : entities) {
                     if (idField.get(entity) == null) {
@@ -605,22 +604,21 @@ public class Session<T> {
     }
 
     private Object generateId(Connection connection, GeneratedValue gen, Field idField) throws SQLException {
+        ValueSpec.validateStrategyAttributes(gen);
+        ValueSpec spec = ValueSpec.parse(gen.value(), gen.strategy());
         String tableName = getTableName();
         String idColumn = getIdColumn();
 
         return switch (gen.strategy()) {
-            case SEQUENCE -> nextSequenceValue(connection, tableName, idColumn, gen.startValue());
-            case ALPHA -> nextSequenceValue(connection, tableName, idColumn, gen.startValue());
+            case SEQUENCE -> nextSequenceValue(connection, tableName, idColumn, spec.sequenceStart());
             case PATTERN -> {
                 if (idField.getType() != String.class) {
-                    throw new SQLException("PATTERN strategy requires String ID field");
+                    throw new SQLException("PATTERN strategy requires a String ID field");
                 }
-                String pattern = gen.pattern();
-                String p = (pattern == null || pattern.isEmpty()) ? tableName.toUpperCase() + "_" : pattern;
-                long nextNumber = nextSequenceValue(connection, tableName, idColumn, gen.startValue());
-                yield p + nextNumber;
+                long counter = nextSequenceValue(connection, tableName, idColumn, spec.sequenceStart());
+                yield spec.format(counter);
             }
-            default -> throw new SQLException("Unsupported ID generation strategy for batch: " + gen.strategy());
+            default -> throw new SQLException("Unsupported strategy for batch: " + gen.strategy());
         };
     }
 
@@ -755,38 +753,37 @@ public class Session<T> {
         String tableName = getTableName();
         String idColumn = getIdColumn();
 
-        if (gen != null) {
-            switch (gen.strategy()) {
-                case SEQUENCE -> {
-                    long seqVal = nextSequenceValue(connection, tableName, idColumn, gen.startValue());
-                    idField.set(entity, seqVal);
-                    idValue = seqVal;
-                }
-                case PATTERN -> {
-                    if (idField.getType() != String.class) {
-                        throw new SQLException("PATTERN strategy requires String ID field");
-                    }
-                    String patternId = generateStartsWithId(connection, gen.pattern(), gen.startValue(), tableName, idColumn);
-                    idField.set(entity, patternId);
-                    idValue = patternId;
-                }
-                case ALPHA -> {
-                    long alphaId = nextSequenceValue(connection, tableName, idColumn, gen.startValue());
-                    idField.set(entity, alphaId);
-                    idValue = alphaId;
-                }
-                case CUSTOM -> {
-                    if (idValue == null) throw new SQLException("CUSTOM strategy requires manual ID");
-                }
-            }
-        }
-
         boolean generatedOnDb = isGeneratedOnDb(gen, idValue);
 
         try {
             new CascadeHandler(connection).handlePrePersist(entity, visited);
         } catch (Exception e) {
             throw new SQLException("Pre-Cascade persist failed", e);
+        }
+
+        if (gen != null) {
+            ValueSpec.validateStrategyAttributes(gen);
+            ValueSpec spec = ValueSpec.parse(gen.value(), gen.strategy());
+
+            switch (gen.strategy()) {
+                case SEQUENCE -> {
+                    long seqVal = nextSequenceValue(connection, tableName, idColumn, spec.sequenceStart());
+                    idField.set(entity, seqVal);
+                    idValue = seqVal;
+                }
+                case PATTERN -> {
+                    if (idField.getType() != String.class) {
+                        throw new SQLException("PATTERN strategy requires a String ID field");
+                    }
+                    long counter = nextSequenceValue(connection, tableName, idColumn, spec.sequenceStart());
+                    String patternId = spec.format(counter);
+                    idField.set(entity, patternId);
+                    idValue = patternId;
+                }
+                case CUSTOM -> {
+                    if (idValue == null) throw new SQLException("CUSTOM strategy requires manual ID assignment before saving");
+                }
+            }
         }
 
         T result = executeInsert(connection, entity, idField, generatedOnDb);
@@ -1515,7 +1512,7 @@ public class Session<T> {
 
     private boolean isGeneratedOnDb(GeneratedValue gen, Object currentIdValue) {
         if (gen == null) return false;
-        return gen.strategy() == Strategy.IDENTITY || (gen.strategy() == Strategy.AUTO && currentIdValue == null);
+        return gen.strategy() == Strategy.IDENTITY || currentIdValue == null;
     }
 
     private long nextSequenceValue(Connection connection, String tableName, String idColumn, long startValue) throws SQLException {
@@ -1621,19 +1618,20 @@ public class Session<T> {
         throw new SQLException("Could not increment sequence: " + seqName);
     }
 
-    private String generateStartsWithId(Connection connection, String pattern, long startsWith, String tableName, String idColumn) throws SQLException {
-        String p = (pattern == null || pattern.isEmpty()) ? tableName.toUpperCase() + "_" : pattern;
-        long nextNumber = nextSequenceValue(connection, tableName, idColumn, startsWith);
-        return p + nextNumber;
+    private String generateStartsWithId(Connection connection, String pattern, ValueSpec spec,
+                                        String tableName, String idColumn) throws SQLException {
+        String prefix  = (pattern == null || pattern.isEmpty()) ? tableName.toUpperCase() + "_" : pattern;
+        long   counter = nextSequenceValue(connection, tableName, idColumn, spec.sequenceStart());
+        return spec.isFormatted() ? prefix + spec.format(counter) : prefix + counter;
     }
 
     public void resetSequence() throws SQLException {
         Field idField = findIdField();
         GeneratedValue gen = getGeneratedValue(idField);
 
-        if (gen != null) {
+        if (gen != null && (gen.strategy() == Strategy.SEQUENCE || gen.strategy() == Strategy.PATTERN)) {
             String seqName = NamingStrategy.getSequenceName(getTableName(), getIdColumn());
-            long startValue = gen.startValue();
+            long startValue = ValueSpec.parse(gen.value(), gen.strategy()).sequenceStart();
 
             Connection conn = acquireConnection();
             String dbName = conn.getMetaData().getDatabaseProductName().toLowerCase();
@@ -1648,7 +1646,7 @@ public class Session<T> {
                     sql = String.format("ALTER SEQUENCE %s RESTART WITH %d", quotedSeq, startValue);
                 }
 
-                QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
+                QueryLogger.QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
                 try (Statement stmt = conn.createStatement()) {
                     stmt.execute(sql);
                     queryLogger.logQueryEnd(logEntry, 0, null);

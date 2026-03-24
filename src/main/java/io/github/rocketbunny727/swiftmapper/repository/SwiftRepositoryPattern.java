@@ -6,7 +6,7 @@ import io.github.rocketbunny727.swiftmapper.criteria.SQLQueryBuilder;
 import java.util.List;
 import java.util.Optional;
 
-public interface Repository<T, ID> {
+public interface SwiftRepositoryPattern<T, ID> {
     T save(T entity);
     List<T> saveAll(List<T> entities);
 

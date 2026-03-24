@@ -12,7 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-public abstract class SwiftRepositorySupport<T, ID> implements Repository<T, ID> {
+public abstract class SwiftRepositorySupport<T, ID> implements SwiftRepositoryPattern<T, ID> {
 
     protected final ConnectionManager connectionManager;
     protected final Class<T> entityClass;

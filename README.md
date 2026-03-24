@@ -64,7 +64,7 @@
 <dependency>
     <groupId>io.github.rocketbunny727</groupId>
     <artifactId>swiftmapper</artifactId>
-    <version>1.0.3</version>
+    <version>1.0.4</version>
 </dependency>
 ```
 
