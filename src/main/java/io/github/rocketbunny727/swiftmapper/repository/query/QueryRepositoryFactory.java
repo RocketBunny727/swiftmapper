@@ -6,7 +6,7 @@ import io.github.rocketbunny727.swiftmapper.query.model.ParameterBinding;
 import io.github.rocketbunny727.swiftmapper.query.model.ParsedQuery;
 import io.github.rocketbunny727.swiftmapper.query.QueryMethodParser;
 import io.github.rocketbunny727.swiftmapper.query.model.QueryType;
-import io.github.rocketbunny727.swiftmapper.repository.Repository;
+import io.github.rocketbunny727.swiftmapper.repository.SwiftRepositoryPattern;
 import io.github.rocketbunny727.swiftmapper.repository.SwiftRepositorySupport;
 import io.github.rocketbunny727.swiftmapper.annotations.entity.Id;
 
@@ -23,7 +23,7 @@ import java.util.*;
 @SuppressWarnings({"unchecked", "rawtypes"})
 public class QueryRepositoryFactory {
 
-    public static <T, ID, R extends Repository<T, ID>> R createInterface(
+    public static <T, ID, R extends SwiftRepositoryPattern<T, ID>> R createInterface(
             Class<R> repositoryInterface,
             Class<T> entityClass,
             ConnectionManager connectionManager) {
@@ -35,15 +35,14 @@ public class QueryRepositoryFactory {
         );
     }
 
-    @Deprecated
-    public static <T, ID> Repository<T, ID> create(
+    public static <T, ID> SwiftRepositoryPattern<T, ID> create(
             Class<T> entityClass,
             Class<ID> idClass,
             ConnectionManager connectionManager) {
         return new SwiftRepositorySupport<T, ID>(connectionManager, entityClass, idClass) {};
     }
 
-    public static <T> Repository<T, ?> createAuto(
+    public static <T> SwiftRepositoryPattern<T, ?> createAuto(
             Class<T> entityClass,
             ConnectionManager connectionManager) {
         Class<?> idClass = detectIdClass(entityClass);
@@ -88,7 +87,7 @@ public class QueryRepositoryFactory {
         private Class<?> extractIdClass(Class<?> repositoryInterface) {
             for (Type genericInterface : repositoryInterface.getGenericInterfaces()) {
                 if (genericInterface instanceof ParameterizedType pt) {
-                    if (pt.getRawType() == Repository.class) {
+                    if (pt.getRawType() == SwiftRepositoryPattern.class) {
                         Type[] args = pt.getActualTypeArguments();
                         if (args.length > 1 && args[1] instanceof Class) {
                             return (Class<?>) args[1];

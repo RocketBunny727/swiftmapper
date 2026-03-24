@@ -1,7 +1,6 @@
 package io.github.rocketbunny727.swiftmapper.autoconfigure;
 
-import io.github.rocketbunny727.swiftmapper.annotations.repository.SwiftRepository;
-import io.github.rocketbunny727.swiftmapper.repository.Repository;
+import io.github.rocketbunny727.swiftmapper.repository.SwiftRepositoryPattern;
 import io.github.rocketbunny727.swiftmapper.utils.logger.SwiftLogger;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
@@ -15,6 +14,7 @@ import org.springframework.context.annotation.ClassPathScanningCandidateComponen
 import org.springframework.context.annotation.ImportBeanDefinitionRegistrar;
 import org.springframework.core.type.AnnotationMetadata;
 import org.springframework.core.type.filter.AnnotationTypeFilter;
+import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -49,7 +49,7 @@ public class SwiftRepositoryRegistrar
         }
 
         if (!repositoryInterfaces.isEmpty()) {
-            log.info("Registered {} @SwiftRepository bean(s): {}",
+            log.info("Registered {} @Repository bean(s): {}",
                     repositoryInterfaces.size(),
                     repositoryInterfaces.stream().map(Class::getSimpleName).toList());
         }
@@ -76,7 +76,7 @@ public class SwiftRepositoryRegistrar
                     }
                 };
 
-        scanner.addIncludeFilter(new AnnotationTypeFilter(SwiftRepository.class));
+        scanner.addIncludeFilter(new AnnotationTypeFilter(Repository.class));
 
         List<Class<?>> found = new ArrayList<>();
 
@@ -86,12 +86,12 @@ public class SwiftRepositoryRegistrar
                 try {
                     Class<?> iface = Class.forName(className, true,
                             Thread.currentThread().getContextClassLoader());
-                    if (iface.isInterface() && Repository.class.isAssignableFrom(iface)) {
+                    if (iface.isInterface() && SwiftRepositoryPattern.class.isAssignableFrom(iface)) {
                         found.add(iface);
-                        log.debug("Found @SwiftRepository: {}", className);
+                        log.debug("Found @Repository: {}", className);
                     } else {
-                        log.warn("@SwiftRepository on '{}' ignored — must be an interface " +
-                                "extending Repository<T, ID>", className);
+                        log.warn("@Repository on '{}' ignored — must be an interface " +
+                                "extending SwiftRepositoryPattern<T, ID>", className);
                     }
                 } catch (ClassNotFoundException e) {
                     log.warn("Could not load @SwiftRepository class: {}", className);

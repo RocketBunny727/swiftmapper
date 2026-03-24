@@ -1,6 +1,6 @@
 package io.github.rocketbunny727.swiftmapper.core;
 
-import io.github.rocketbunny727.swiftmapper.repository.Repository;
+import io.github.rocketbunny727.swiftmapper.repository.SwiftRepositoryPattern;
 import io.github.rocketbunny727.swiftmapper.repository.query.QueryRepositoryFactory;
 import lombok.Getter;
 
@@ -14,7 +14,7 @@ public class SwiftMapperContext {
 
     @Getter
     private final ConnectionManager connectionManager;
-    private final Map<Class<?>, Repository<?, ?>> repositories = new HashMap<>();
+    private final Map<Class<?>, SwiftRepositoryPattern<?, ?>> repositories = new HashMap<>();
 
     private SwiftMapperContext(ConnectionManager connectionManager) {
         this.connectionManager = connectionManager;
@@ -34,15 +34,15 @@ public class SwiftMapperContext {
     }
 
     @SuppressWarnings("unchecked")
-    public <T, ID, R extends Repository<T, ID>> R getRepository(Class<R> repositoryInterface) {
+    public <T, ID, R extends SwiftRepositoryPattern<T, ID>> R getRepository(Class<R> repositoryInterface) {
         return (R) repositories.computeIfAbsent(repositoryInterface,
                 k -> QueryRepositoryFactory.createInterface(repositoryInterface,
                         detectEntityClass(repositoryInterface), connectionManager));
     }
 
     @SuppressWarnings("unchecked")
-    public <T, ID> Repository<T, ID> getRepository(Class<T> entityClass, Class<ID> idClass) {
-        return (Repository<T, ID>) repositories.computeIfAbsent(entityClass,
+    public <T, ID> SwiftRepositoryPattern<T, ID> getRepository(Class<T> entityClass, Class<ID> idClass) {
+        return (SwiftRepositoryPattern<T, ID>) repositories.computeIfAbsent(entityClass,
                 k -> QueryRepositoryFactory.create(entityClass, idClass, connectionManager));
     }
 
@@ -50,7 +50,7 @@ public class SwiftMapperContext {
     private static <T> Class<T> detectEntityClass(Class<?> repositoryInterface) {
         for (Type genericInterface : repositoryInterface.getGenericInterfaces()) {
             if (genericInterface instanceof ParameterizedType pt) {
-                if (pt.getRawType() == Repository.class) {
+                if (pt.getRawType() == SwiftRepositoryPattern.class) {
                     return (Class<T>) pt.getActualTypeArguments()[0];
                 }
             }

@@ -213,10 +213,9 @@ public class ConnectionManager {
                 columns.add(colDef);
 
                 if (idGen != null && (idGen.strategy() == Strategy.SEQUENCE ||
-                        idGen.strategy() == Strategy.PATTERN ||
-                        idGen.strategy() == Strategy.ALPHA)) {
+                        idGen.strategy() == Strategy.PATTERN)) {
                     needSequence = true;
-                    sequenceStartValue = idGen.startValue();
+                    sequenceStartValue = ValueSpec.parse(idGen.value(), idGen.strategy()).sequenceStart();
                 }
             } else if (field.isAnnotationPresent(ManyToOne.class)) {
                 JoinColumn jc = field.getAnnotation(JoinColumn.class);
@@ -469,7 +468,7 @@ public class ConnectionManager {
             return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
         } else if (gen != null && gen.strategy() == Strategy.IDENTITY) {
             return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
-        } else if (gen != null && gen.strategy() == Strategy.ALPHA) {
+        } else if (gen != null) {
             return qi(idColumn) + " BIGINT PRIMARY KEY";
         }
         return qi(idColumn) + " " + sqlType + " PRIMARY KEY";

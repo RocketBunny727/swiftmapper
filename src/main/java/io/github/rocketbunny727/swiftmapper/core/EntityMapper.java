@@ -543,19 +543,54 @@ public class EntityMapper<T> {
     private Object convertValue(Object value, Class<?> targetType) {
         if (value == null) return null;
 
-        if (targetType == boolean.class || targetType == Boolean.class)
-            return value;
-        if (targetType == int.class || targetType == Integer.class)
-            return ((Number)value).intValue();
-        if (targetType == long.class || targetType == Long.class)
-            return ((Number)value).longValue();
-        if (targetType == double.class || targetType == Double.class)
-            return ((Number)value).doubleValue();
-        if (targetType == LocalDateTime.class && value instanceof Timestamp)
-            return ((Timestamp)value).toLocalDateTime();
-        if (targetType == LocalDate.class && value instanceof Date)
-            return ((Date)value).toLocalDate();
+        if (targetType.isInstance(value)) return value;
+
+        if (targetType == String.class) return value.toString();
+
+        Class<?> wrapper = getWrapperClass(targetType);
+
+        if (value instanceof String s && Number.class.isAssignableFrom(wrapper)) {
+            if (wrapper == Long.class) return Long.parseLong(s);
+            if (wrapper == Integer.class) return Integer.parseInt(s);
+            if (wrapper == Double.class) return Double.parseDouble(s);
+            if (wrapper == Float.class) return Float.parseFloat(s);
+        }
+
+        if (value instanceof Number n) {
+            if (wrapper == Integer.class) return n.intValue();
+            if (wrapper == Long.class) return n.longValue();
+            if (wrapper == Double.class) return n.doubleValue();
+            if (wrapper == Float.class) return n.floatValue();
+            if (wrapper == Short.class) return n.shortValue();
+            if (wrapper == Boolean.class) return n.intValue() != 0;
+        }
+
+        if (targetType == LocalDateTime.class && value instanceof java.sql.Timestamp ts) {
+            return ts.toLocalDateTime();
+        }
+        if (targetType == LocalDate.class && value instanceof java.sql.Date d) {
+            return d.toLocalDate();
+        }
+        if (targetType == LocalTime.class && value instanceof java.sql.Time t) {
+            return t.toLocalTime();
+        }
+
+        if (wrapper == Boolean.class && value instanceof Boolean b) {
+            return b;
+        }
 
         return value;
+    }
+
+    private Class<?> getWrapperClass(Class<?> type) {
+        if (!type.isPrimitive()) return type;
+        if (type == long.class) return Long.class;
+        if (type == int.class) return Integer.class;
+        if (type == double.class) return Double.class;
+        if (type == float.class) return Float.class;
+        if (type == boolean.class) return Boolean.class;
+        if (type == short.class) return Short.class;
+        if (type == byte.class) return Byte.class;
+        return type;
     }
 }
