@@ -1512,7 +1512,10 @@ public class Session<T> {
 
     private boolean isGeneratedOnDb(GeneratedValue gen, Object currentIdValue) {
         if (gen == null) return false;
-        return gen.strategy() == Strategy.IDENTITY || currentIdValue == null;
+        // Only IDENTITY delegates ID generation to the database (SERIAL / AUTO_INCREMENT).
+        // SEQUENCE, PATTERN and CUSTOM generate the ID on the ORM side before the INSERT,
+        // so they must NOT be treated as DB-generated even when the field is currently null.
+        return gen.strategy() == Strategy.IDENTITY;
     }
 
     private long nextSequenceValue(Connection connection, String tableName, String idColumn, long startValue) throws SQLException {

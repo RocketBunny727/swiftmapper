@@ -115,7 +115,7 @@ public class SwiftRepositoryRegistrar
                 .genericBeanDefinition(SwiftRepositoryFactoryBean.class)
                 .addConstructorArgValue(iface)
                 .addConstructorArgReference(SwiftMapperAutoConfiguration.CONTEXT_BEAN_NAME)
-                .setLazyInit(false)
+                .setLazyInit(true)
                 .getBeanDefinition();
 
         registry.registerBeanDefinition(beanName, bd);
