@@ -71,11 +71,52 @@ public class ConfigReader {
     }
 
     public String getString(String key, String defaultValue) {
-        return config.getOrDefault(key, defaultValue);
+        String raw = config.getOrDefault(key, defaultValue);
+        return resolvePlaceholders(raw);
+    }
+
+    /**
+     * Resolves Spring-style placeholders: ${VAR:default}.
+     * Resolution order: environment variable → system property → declared default.
+     */
+    private String resolvePlaceholders(String value) {
+        if (value == null || !value.contains("${")) {
+            return value;
+        }
+        StringBuilder result = new StringBuilder(value.length());
+        int i = 0;
+        while (i < value.length()) {
+            int start = value.indexOf("${", i);
+            if (start == -1) {
+                result.append(value, i, value.length());
+                break;
+            }
+            result.append(value, i, start);
+            int end = value.indexOf('}', start);
+            if (end == -1) {
+                result.append(value, start, value.length());
+                break;
+            }
+            String placeholder = value.substring(start + 2, end);
+            int colonIdx = placeholder.indexOf(':');
+            String varName  = colonIdx >= 0 ? placeholder.substring(0, colonIdx)  : placeholder;
+            String fallback = colonIdx >= 0 ? placeholder.substring(colonIdx + 1) : null;
+
+            String resolved = System.getenv(varName);
+            if (resolved == null) resolved = System.getProperty(varName);
+            if (resolved == null) resolved = fallback;
+            if (resolved == null) {
+                resolved = "${".concat(placeholder).concat("}");
+                log.warn("Unresolvable placeholder '{}' — no env var, system property, or default value", varName);
+            }
+            result.append(resolved);
+            i = end + 1;
+        }
+        return result.toString();
     }
 
     public int getInt(String key, int defaultValue) {
-        String value = config.get(key);
+        String value = getString(key, null);
         if (value != null) {
             try {
                 return Integer.parseInt(value);
@@ -87,7 +128,7 @@ public class ConfigReader {
     }
 
     public long getLong(String key, long defaultValue) {
-        String value = config.get(key);
+        String value = getString(key, null);
         if (value != null) {
             try {
                 return Long.parseLong(value);
@@ -99,7 +140,7 @@ public class ConfigReader {
     }
 
     public boolean getBoolean(String key, boolean defaultValue) {
-        String value = config.get(key);
+        String value = getString(key, null);
         if (value != null) {
             return Boolean.parseBoolean(value);
         }
