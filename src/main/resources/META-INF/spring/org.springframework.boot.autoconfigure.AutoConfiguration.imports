@@ -1,2 +1,3 @@
+io.github.rocketbunny727.swiftmapper.autoconfigure.SwiftMapperContextConfiguration
 io.github.rocketbunny727.swiftmapper.autoconfigure.SwiftMapperAutoConfiguration
 io.github.rocketbunny727.swiftmapper.autoconfigure.SwiftTransactionalAutoConfiguration

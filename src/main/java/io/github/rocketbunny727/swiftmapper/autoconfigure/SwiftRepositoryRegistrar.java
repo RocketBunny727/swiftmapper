@@ -37,8 +37,7 @@ public class SwiftRepositoryRegistrar
                                         BeanDefinitionRegistry registry) {
         List<String> basePackages = resolveBasePackages();
         if (basePackages.isEmpty()) {
-            log.warn("No base packages found for @SwiftRepository scanning. " +
-                    "Ensure @SpringBootApplication is present.");
+            log.warn("No base packages found for @SwiftRepository scanning.");
             return;
         }
 
@@ -61,7 +60,7 @@ public class SwiftRepositoryRegistrar
                 return AutoConfigurationPackages.get(lbf);
             }
         } catch (IllegalStateException e) {
-            log.debug("AutoConfigurationPackages not available: {}", e.getMessage());
+            log.debug("AutoConfigurationPackages not available");
         }
         return List.of();
     }
@@ -88,38 +87,29 @@ public class SwiftRepositoryRegistrar
                             Thread.currentThread().getContextClassLoader());
                     if (iface.isInterface() && SwiftRepositoryPattern.class.isAssignableFrom(iface)) {
                         found.add(iface);
-                        log.debug("Found @Repository: {}", className);
                     } else {
-                        log.warn("@Repository on '{}' ignored — must be an interface " +
-                                "extending SwiftRepositoryPattern<T, ID>", className);
+                        log.warn("@Repository on '{}' ignored — must extend SwiftRepositoryPattern", className);
                     }
                 } catch (ClassNotFoundException e) {
-                    log.warn("Could not load @SwiftRepository class: {}", className);
+                    log.warn("Could not load repository: {}", className);
                 }
             }
         }
-
         return found;
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     private void registerRepositoryBean(BeanDefinitionRegistry registry, Class<?> iface) {
         String beanName = buildBeanName(iface);
 
-        if (registry.containsBeanDefinition(beanName)) {
-            log.debug("Bean '{}' already registered, skipping", beanName);
-            return;
-        }
+        if (registry.containsBeanDefinition(beanName)) return;
 
         BeanDefinition bd = BeanDefinitionBuilder
                 .genericBeanDefinition(SwiftRepositoryFactoryBean.class)
                 .addConstructorArgValue(iface)
-                .addConstructorArgReference(SwiftMapperAutoConfiguration.CONTEXT_BEAN_NAME)
                 .setLazyInit(true)
                 .getBeanDefinition();
 
         registry.registerBeanDefinition(beanName, bd);
-        log.debug("Registered repository bean '{}' -> {}", beanName, iface.getName());
     }
 
     private String buildBeanName(Class<?> iface) {
