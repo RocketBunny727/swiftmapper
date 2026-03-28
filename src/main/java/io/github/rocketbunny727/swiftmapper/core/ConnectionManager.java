@@ -36,30 +36,41 @@ public class ConnectionManager {
     private final StatementCache statementCache;
     private static final SwiftLogger log = SwiftLogger.getLogger(ConnectionManager.class);
 
+    private static volatile ConnectionManager instance;
+    private static final Object lock = new Object();
+
     public static ConnectionManager fromConfig() {
-        ConfigReader configReader = new ConfigReader();
+        if (instance == null) {
+            synchronized (lock) {
+                if (instance == null) {
+                    ConfigReader configReader = new ConfigReader();
 
-        ConfigReader.LoggingConfig loggingConfig = configReader.getLoggingConfig();
-        SwiftLogger.setLevel(loggingConfig.level());
-        SwiftLogger.setSqlLogging(loggingConfig.logSql());
+                    ConfigReader.LoggingConfig loggingConfig = configReader.getLoggingConfig();
+                    SwiftLogger.setLevel(loggingConfig.level());
+                    SwiftLogger.setSqlLogging(loggingConfig.logSql());
 
-        DatasourceConfig ds = configReader.getDatasourceConfig();
-        log.info("Loaded datasource config: {}@{}", ds.username(), ds.url());
+                    DatasourceConfig ds = configReader.getDatasourceConfig();
+                    log.info("Loaded datasource config: {}@{}", ds.username(), ds.url());
 
-        ConfigReader.PoolConfig poolConfig = configReader.getPoolConfig();
-        ConnectionManager manager = new ConnectionManager(ds, poolConfig);
+                    ConfigReader.PoolConfig poolConfig = configReader.getPoolConfig();
 
-        if (ds.migrationsLocation() != null && !ds.migrationsLocation().isBlank()) {
-            MigrationRunner runner =
-                    new MigrationRunner(manager.connectionPool.getDataSource(), ds.migrationsLocation());
-            try {
-                runner.runMigrations();
-            } catch (SQLException e) {
-                throw new ConnectionException("Failed to run migrations from " + ds.migrationsLocation(), e);
+                    ConnectionManager manager = new ConnectionManager(ds, poolConfig);
+
+                    if (ds.migrationsLocation() != null && !ds.migrationsLocation().isBlank()) {
+                        MigrationRunner runner =
+                                new MigrationRunner(manager.connectionPool.getDataSource(), ds.migrationsLocation());
+                        try {
+                            runner.runMigrations();
+                        } catch (SQLException e) {
+                            throw new ConnectionException("Failed to run migrations from " + ds.migrationsLocation(), e);
+                        }
+                    }
+
+                    instance = manager;
+                }
             }
         }
-
-        return manager;
+        return instance;
     }
 
     private ConnectionManager(DatasourceConfig dsConfig, ConfigReader.PoolConfig poolConfig) {
@@ -569,5 +580,14 @@ public class ConnectionManager {
 
     public <T, ID> SwiftRepository<T, ID> repository(Class<T> entityClass, Class<ID> idClass) {
         return new SwiftRepository<>(this, entityClass, idClass);
+    }
+
+    public static void resetInstance() {
+        synchronized (lock) {
+            if (instance != null) {
+                instance.close();
+                instance = null;
+            }
+        }
     }
 }
