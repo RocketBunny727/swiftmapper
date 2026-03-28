@@ -26,6 +26,24 @@ public class ConnectionPool {
 
         hikariConfig.setAutoCommit(false);
         this.dataSource = new HikariDataSource(hikariConfig);
+        validateConnection(config);
+    }
+
+    private void validateConnection(DatasourceConfig config) {
+        try (Connection conn = dataSource.getConnection()) {
+            if (!conn.isValid(5)) {
+                throw new IllegalStateException(
+                        "Database connection is not valid (isValid returned false). URL: " + config.url());
+            }
+        } catch (SQLException e) {
+            dataSource.close();
+            throw new IllegalStateException(
+                    "Failed to establish database connection. " +
+                            "Please check that the database is running and the credentials are correct." +
+                    "  URL:  " + config.url() +
+                    "  User: " + config.username() +
+                    "  Cause: " + e.getMessage(), e);
+        }
     }
 
     public Connection getConnection() throws SQLException {
