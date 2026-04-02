@@ -64,7 +64,18 @@
 <dependency>
     <groupId>io.github.rocketbunny727</groupId>
     <artifactId>swiftmapper</artifactId>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
+</dependency>
+```
+
+SwiftMapper требует SLF4J API для логирования. Добавьте реализацию SLF4J (например, Logback для Spring Boot):
+
+```xml
+<!-- Реализация SLF4J (обычно предоставляется Spring Boot) -->
+<dependency>
+    <groupId>ch.qos.logback</groupId>
+    <artifactId>logback-classic</artifactId>
+    <version>1.5.12</version>
 </dependency>
 ```
 
@@ -203,11 +214,11 @@ public class Car {
 
 ### 2. Создайте интерфейс репозитория
 
-Аннотируйте его `@SwiftRepository` — авто-конфигурация Spring Boot зарегистрирует его автоматически:
+Аннотируйте его `@Repository` — авто-конфигурация Spring Boot зарегистрирует его автоматически:
 
 ```java
-@SwiftRepository
-public interface CarRepository extends Repository<Car, Long> {
+@Repository
+public interface CarRepository extends SwiftRepositoryPattern<Car, Long> {
     List<Car> findAllByBrand(String brand);
     Optional<Car> findByVin(String vin);
     List<Car> findByBrandAndModel(String brand, String model);
@@ -221,7 +232,7 @@ public interface CarRepository extends Repository<Car, Long> {
 
 ### 3. Используйте репозиторий
 
-При использовании авто-конфигурации Spring Boot все `@SwiftRepository`-интерфейсы и `@Entity`-классы обнаруживаются автоматически — никаких ручных объявлений `@Bean` не требуется:
+При использовании авто-конфигурации Spring Boot все `@Repository`-интерфейсы и `@Entity`-классы обнаруживаются автоматически — никаких ручных объявлений `@Bean` не требуется:
 
 ```java
 @Service
@@ -325,7 +336,7 @@ private Long id;
 
 ## Репозитории
 
-Каждый интерфейс репозитория должен расширять `Repository<T, ID>`, где `T` — тип сущности, `ID` — тип первичного ключа.
+Каждый интерфейс репозитория должен расширять `SwiftRepositoryPattern<T, ID>`, где `T` — тип сущности, `ID` — тип первичного ключа.
 
 ### Встроенные методы репозитория
 
@@ -347,11 +358,11 @@ SQLQueryBuilder sql();
 
 ### Пользовательские методы репозитория
 
-Аннотируйте интерфейс `@SwiftRepository` и объявляйте методы по соглашениям из раздела [Query-методы](#query-методы):
+Аннотируйте интерфейс `@Repository` и объявляйте методы по соглашениям из раздела [Query-методы](#query-методы):
 
 ```java
-@SwiftRepository
-public interface ProductRepository extends Repository<Product, Long> {
+@Repository
+public interface ProductRepository extends SwiftRepositoryPattern<Product, Long> {
 
     List<Product> findAllByCategory(String category);
 
@@ -885,7 +896,7 @@ SwiftMapper интегрируется со Spring Boot через авто-ко
 
 1. SwiftMapper регистрирует авто-конфигурацию через `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
 2. `SwiftMapperAutoConfiguration` сканирует `@Entity`-классы в пакетах вашего приложения и инициализирует схему согласно `ddl-auto`.
-3. `SwiftRepositoryRegistrar` сканирует интерфейсы с аннотацией `@SwiftRepository` и регистрирует для каждого `FactoryBean`, делая их доступными для инъекции.
+3. `SwiftRepositoryRegistrar` сканирует интерфейсы с аннотацией `@Repository` и регистрирует для каждого `FactoryBean`, делая их доступными для инъекции.
 
 ### Минимальная настройка
 
@@ -897,9 +908,9 @@ SwiftMapper интегрируется со Spring Boot через авто-ко
 @Table(name = "cars")
 public class Car { ... }
 
-// Репозиторий — аннотируйте @SwiftRepository для авто-регистрации
-@SwiftRepository
-public interface CarRepository extends Repository<Car, Long> { ... }
+// Репозиторий — аннотируйте @Repository для авто-регистрации
+@Repository
+public interface CarRepository extends SwiftRepositoryPattern<Car, Long> { ... }
 
 // Сервис — инжектируйте напрямую
 @Service
@@ -923,6 +934,46 @@ CustomerRepository custRepo = ctx.getRepository(CustomerRepository.class);
 // при завершении работы
 ctx.close();
 ```
+
+---
+
+## Вопросы безопасности
+
+### Управление зависимостями
+
+SwiftMapper 1.0.7+ исключает `slf4j-api` из shaded jar для предотвращения конфликтов с фреймворком логирования вашего приложения. Вы должны предоставить собственную реализацию SLF4J:
+
+- Приложения Spring Boot: `spring-boot-starter-logging` (включен по умолчанию)
+- Standalone приложения: Добавьте `logback-classic` или другую реализацию SLF4J
+
+### Обновленные зависимости (v1.0.7)
+
+Этот релиз обновляет несколько зависимостей для устранения известных уязвимостей:
+
+- HikariCP: 5.1.0 → 6.2.1
+- SnakeYAML: 2.2 → 2.3 (исправляет CVE-2022-1471 и связанные проблемы)
+- ByteBuddy: 1.14.11 → 1.15.10
+- PostgreSQL JDBC: 42.7.1 → 42.7.4
+- H2: 2.2.224 → 2.3.232
+- Lombok: 1.18.30 → 1.18.36
+
+### Лучшие практики
+
+- Всегда используйте параметризованные запросы (SwiftMapper делает это автоматически)
+- Валидируйте SQL-файлы миграций перед развертыванием
+- Используйте переменные окружения для чувствительной конфигурации (пароли, URL)
+- Включите обнаружение утечек соединений в production:
+  ```yaml
+  swiftmapper:
+    pool:
+      leak-detection-threshold: 60000  # 60 секунд
+  ```
+- Мониторьте медленные запросы:
+  ```yaml
+  swiftmapper:
+    logging:
+      slow-query-threshold: 1000  # 1 секунда
+  ```
 
 ---
 

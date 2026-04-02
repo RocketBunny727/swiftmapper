@@ -64,7 +64,18 @@
 <dependency>
     <groupId>io.github.rocketbunny727</groupId>
     <artifactId>swiftmapper</artifactId>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
+</dependency>
+```
+
+SwiftMapper requires SLF4J API for logging. Add an SLF4J implementation (e.g., Logback for Spring Boot):
+
+```xml
+<!-- SLF4J implementation (usually provided by Spring Boot) -->
+<dependency>
+    <groupId>ch.qos.logback</groupId>
+    <artifactId>logback-classic</artifactId>
+    <version>1.5.12</version>
 </dependency>
 ```
 
@@ -203,11 +214,11 @@ public class Car {
 
 ### 2. Create a Repository Interface
 
-Annotate it with `@SwiftRepository` so Spring Boot auto-configuration picks it up automatically:
+Annotate it with `@Repository` so Spring Boot auto-configuration picks it up automatically:
 
 ```java
-@SwiftRepository
-public interface CarRepository extends Repository<Car, Long> {
+@Repository
+public interface CarRepository extends SwiftRepositoryPattern<Car, Long> {
     List<Car> findAllByBrand(String brand);
     Optional<Car> findByVin(String vin);
     List<Car> findByBrandAndModel(String brand, String model);
@@ -221,7 +232,7 @@ public interface CarRepository extends Repository<Car, Long> {
 
 ### 3. Use the Repository
 
-With Spring Boot auto-configuration, all `@SwiftRepository` interfaces and `@Entity` classes are discovered automatically — no manual `@Bean` definitions needed:
+With Spring Boot auto-configuration, all `@Repository` interfaces and `@Entity` classes are discovered automatically — no manual `@Bean` definitions needed:
 
 ```java
 @Service
@@ -325,7 +336,7 @@ private Long id;
 
 ## Repositories
 
-Every repository interface must extend `Repository<T, ID>`, where `T` is the entity type and `ID` is the primary key type.
+Every repository interface must extend `SwiftRepositoryPattern<T, ID>`, where `T` is the entity type and `ID` is the primary key type.
 
 ### Built-in Repository Methods
 
@@ -347,10 +358,10 @@ SQLQueryBuilder sql();
 
 ### Custom Repository Methods
 
-Annotate the interface with `@SwiftRepository` and define methods following the naming conventions in [Query Methods](#query-methods):
+Annotate the interface with `@Repository` and define methods following the naming conventions in [Query Methods](#query-methods):
 
 ```java
-@SwiftRepository
+@Repository
 public interface ProductRepository extends Repository<Product, Long> {
 
     List<Product> findAllByCategory(String category);
@@ -885,7 +896,7 @@ SwiftMapper integrates with Spring Boot via auto-configuration. No manual `@Bean
 
 1. SwiftMapper registers its auto-configuration via `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
 2. `SwiftMapperAutoConfiguration` scans for `@Entity` classes in your application packages and initialises the schema according to `ddl-auto`.
-3. `SwiftRepositoryRegistrar` scans for interfaces annotated with `@SwiftRepository` and registers a `FactoryBean` for each one, making them available for injection.
+3. `SwiftRepositoryRegistrar` scans for interfaces annotated with `@Repository` and registers a `FactoryBean` for each one, making them available for injection.
 
 ### Minimal setup
 
@@ -897,8 +908,8 @@ All you need is a valid `application.yml` and your annotated entities and reposi
 @Table(name = "cars")
 public class Car { ... }
 
-// Repository — annotate with @SwiftRepository for auto-registration
-@SwiftRepository
+// Repository — annotate with @Repository for auto-registration
+@Repository
 public interface CarRepository extends Repository<Car, Long> { ... }
 
 // Service — inject directly
@@ -923,6 +934,46 @@ CustomerRepository custRepo = ctx.getRepository(CustomerRepository.class);
 // when shutting down
 ctx.close();
 ```
+
+---
+
+## Security Considerations
+
+### Dependency Management
+
+SwiftMapper 1.0.7+ excludes `slf4j-api` from the shaded jar to prevent conflicts with your application's logging framework. You must provide your own SLF4J implementation:
+
+- Spring Boot applications: `spring-boot-starter-logging` (included by default)
+- Standalone applications: Add `logback-classic` or another SLF4J binding
+
+### Updated Dependencies (v1.0.7)
+
+This release updates several dependencies to address known vulnerabilities:
+
+- HikariCP: 5.1.0 → 6.2.1
+- SnakeYAML: 2.2 → 2.3 (fixes CVE-2022-1471 and related issues)
+- ByteBuddy: 1.14.11 → 1.15.10
+- PostgreSQL JDBC: 42.7.1 → 42.7.4
+- H2: 2.2.224 → 2.3.232
+- Lombok: 1.18.30 → 1.18.36
+
+### Best Practices
+
+- Always use parameterized queries (SwiftMapper does this automatically)
+- Validate migration SQL files before deployment
+- Use environment variables for sensitive configuration (passwords, URLs)
+- Enable connection leak detection in production:
+  ```yaml
+  swiftmapper:
+    pool:
+      leak-detection-threshold: 60000  # 60 seconds
+  ```
+- Monitor slow queries:
+  ```yaml
+  swiftmapper:
+    logging:
+      slow-query-threshold: 1000  # 1 second
+  ```
 
 ---
 

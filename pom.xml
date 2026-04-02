@@ -6,7 +6,7 @@
 
     <groupId>io.github.rocketbunny727</groupId>
     <artifactId>swiftmapper</artifactId>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
     <packaging>jar</packaging>
 
     <name>SwiftMapper</name>
@@ -39,18 +39,18 @@
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <bytebuddy.version>1.14.11</bytebuddy.version>
-        <hikari.version>5.1.0</hikari.version>
-        <snakeyaml.version>2.2</snakeyaml.version>
+        <bytebuddy.version>1.15.10</bytebuddy.version>
+        <hikari.version>6.2.1</hikari.version>
+        <snakeyaml.version>2.3</snakeyaml.version>
         <caffeine.version>3.1.8</caffeine.version>
         <aop.version>2.1.16.RELEASE</aop.version>
-        <lombok.version>1.18.30</lombok.version>
-        <junit.version>5.10.1</junit.version>
-        <mockito.version>5.8.0</mockito.version>
-        <assertj.version>3.24.2</assertj.version>
-        <h2.version>2.2.224</h2.version>
-        <postgresql.version>42.7.1</postgresql.version>
-        <jacoco.version>0.8.11</jacoco.version>
+        <lombok.version>1.18.36</lombok.version>
+        <junit.version>5.11.4</junit.version>
+        <mockito.version>5.14.2</mockito.version>
+        <assertj.version>3.27.3</assertj.version>
+        <h2.version>2.3.232</h2.version>
+        <postgresql.version>42.7.4</postgresql.version>
+        <jacoco.version>0.8.12</jacoco.version>
     </properties>
 
     <dependencies>
@@ -65,6 +65,12 @@
             <artifactId>HikariCP</artifactId>
             <version>${hikari.version}</version>
             <scope>compile</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.yaml</groupId>
@@ -78,6 +84,14 @@
             <version>${caffeine.version}</version>
             <scope>compile</scope>
         </dependency>
+
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.16</version>
+            <scope>provided</scope>
+        </dependency>
+        
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-aop</artifactId>
@@ -92,7 +106,6 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Test dependencies -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -199,6 +212,9 @@
                                         <exclude>META-INF/LICENSE*</exclude>
                                         <exclude>META-INF/NOTICE*</exclude>
                                         <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <!-- Exclude slf4j classes to prevent conflicts with consumer's logging framework -->
+                                        <exclude>org/slf4j/**</exclude>
+                                        <exclude>META-INF/maven/org.slf4j/**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
