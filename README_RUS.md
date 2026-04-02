@@ -64,7 +64,18 @@
 <dependency>
     <groupId>io.github.rocketbunny727</groupId>
     <artifactId>swiftmapper</artifactId>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
+</dependency>
+```
+
+SwiftMapper требует SLF4J API для логирования. Добавьте реализацию SLF4J (например, Logback для Spring Boot):
+
+```xml
+<!-- Реализация SLF4J (обычно предоставляется Spring Boot) -->
+<dependency>
+    <groupId>ch.qos.logback</groupId>
+    <artifactId>logback-classic</artifactId>
+    <version>1.5.12</version>
 </dependency>
 ```
 
@@ -923,6 +934,46 @@ CustomerRepository custRepo = ctx.getRepository(CustomerRepository.class);
 // при завершении работы
 ctx.close();
 ```
+
+---
+
+## Вопросы безопасности
+
+### Управление зависимостями
+
+SwiftMapper 1.0.7+ исключает `slf4j-api` из shaded jar для предотвращения конфликтов с фреймворком логирования вашего приложения. Вы должны предоставить собственную реализацию SLF4J:
+
+- Приложения Spring Boot: `spring-boot-starter-logging` (включен по умолчанию)
+- Standalone приложения: Добавьте `logback-classic` или другую реализацию SLF4J
+
+### Обновленные зависимости (v1.0.7)
+
+Этот релиз обновляет несколько зависимостей для устранения известных уязвимостей:
+
+- HikariCP: 5.1.0 → 6.2.1
+- SnakeYAML: 2.2 → 2.3 (исправляет CVE-2022-1471 и связанные проблемы)
+- ByteBuddy: 1.14.11 → 1.15.10
+- PostgreSQL JDBC: 42.7.1 → 42.7.4
+- H2: 2.2.224 → 2.3.232
+- Lombok: 1.18.30 → 1.18.36
+
+### Лучшие практики
+
+- Всегда используйте параметризованные запросы (SwiftMapper делает это автоматически)
+- Валидируйте SQL-файлы миграций перед развертыванием
+- Используйте переменные окружения для чувствительной конфигурации (пароли, URL)
+- Включите обнаружение утечек соединений в production:
+  ```yaml
+  swiftmapper:
+    pool:
+      leak-detection-threshold: 60000  # 60 секунд
+  ```
+- Мониторьте медленные запросы:
+  ```yaml
+  swiftmapper:
+    logging:
+      slow-query-threshold: 1000  # 1 секунда
+  ```
 
 ---
 
