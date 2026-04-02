@@ -214,11 +214,11 @@ public class Car {
 
 ### 2. Создайте интерфейс репозитория
 
-Аннотируйте его `@SwiftRepository` — авто-конфигурация Spring Boot зарегистрирует его автоматически:
+Аннотируйте его `@Repository` — авто-конфигурация Spring Boot зарегистрирует его автоматически:
 
 ```java
-@SwiftRepository
-public interface CarRepository extends Repository<Car, Long> {
+@Repository
+public interface CarRepository extends SwiftRepositoryPattern<Car, Long> {
     List<Car> findAllByBrand(String brand);
     Optional<Car> findByVin(String vin);
     List<Car> findByBrandAndModel(String brand, String model);
@@ -232,7 +232,7 @@ public interface CarRepository extends Repository<Car, Long> {
 
 ### 3. Используйте репозиторий
 
-При использовании авто-конфигурации Spring Boot все `@SwiftRepository`-интерфейсы и `@Entity`-классы обнаруживаются автоматически — никаких ручных объявлений `@Bean` не требуется:
+При использовании авто-конфигурации Spring Boot все `@Repository`-интерфейсы и `@Entity`-классы обнаруживаются автоматически — никаких ручных объявлений `@Bean` не требуется:
 
 ```java
 @Service
@@ -336,7 +336,7 @@ private Long id;
 
 ## Репозитории
 
-Каждый интерфейс репозитория должен расширять `Repository<T, ID>`, где `T` — тип сущности, `ID` — тип первичного ключа.
+Каждый интерфейс репозитория должен расширять `SwiftRepositoryPattern<T, ID>`, где `T` — тип сущности, `ID` — тип первичного ключа.
 
 ### Встроенные методы репозитория
 
@@ -358,11 +358,11 @@ SQLQueryBuilder sql();
 
 ### Пользовательские методы репозитория
 
-Аннотируйте интерфейс `@SwiftRepository` и объявляйте методы по соглашениям из раздела [Query-методы](#query-методы):
+Аннотируйте интерфейс `@Repository` и объявляйте методы по соглашениям из раздела [Query-методы](#query-методы):
 
 ```java
-@SwiftRepository
-public interface ProductRepository extends Repository<Product, Long> {
+@Repository
+public interface ProductRepository extends SwiftRepositoryPattern<Product, Long> {
 
     List<Product> findAllByCategory(String category);
 
@@ -896,7 +896,7 @@ SwiftMapper интегрируется со Spring Boot через авто-ко
 
 1. SwiftMapper регистрирует авто-конфигурацию через `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
 2. `SwiftMapperAutoConfiguration` сканирует `@Entity`-классы в пакетах вашего приложения и инициализирует схему согласно `ddl-auto`.
-3. `SwiftRepositoryRegistrar` сканирует интерфейсы с аннотацией `@SwiftRepository` и регистрирует для каждого `FactoryBean`, делая их доступными для инъекции.
+3. `SwiftRepositoryRegistrar` сканирует интерфейсы с аннотацией `@Repository` и регистрирует для каждого `FactoryBean`, делая их доступными для инъекции.
 
 ### Минимальная настройка
 
@@ -908,9 +908,9 @@ SwiftMapper интегрируется со Spring Boot через авто-ко
 @Table(name = "cars")
 public class Car { ... }
 
-// Репозиторий — аннотируйте @SwiftRepository для авто-регистрации
-@SwiftRepository
-public interface CarRepository extends Repository<Car, Long> { ... }
+// Репозиторий — аннотируйте @Repository для авто-регистрации
+@Repository
+public interface CarRepository extends SwiftRepositoryPattern<Car, Long> { ... }
 
 // Сервис — инжектируйте напрямую
 @Service
