@@ -185,6 +185,11 @@ public class Session<T> {
                 return Optional.empty();
             }
 
+            String[] eagerRelations = getEagerRelationNames();
+            if (eagerRelations.length > 0) {
+                EagerLoader.batchLoad(result, entityClass, conn, connectionManager, eagerRelations);
+            }
+
             if (cacheEnabled) {
                 queryCache.put(entityClass.getName() + ":findById:" + id, result);
             }
@@ -1369,6 +1374,12 @@ public class Session<T> {
         try {
             List<T> result = executeQuery(conn, sql);
             queryLogger.logQueryEnd(logEntry, result.size(), null);
+
+            String[] eagerRelations = getEagerRelationNames();
+            if (!result.isEmpty() && eagerRelations.length > 0) {
+                EagerLoader.batchLoad(result, entityClass, conn, connectionManager, eagerRelations);
+            }
+
             metricsCollector.recordQuery("findAll", Duration.between(start, Instant.now()), true);
 
             if (cacheEnabled) {
@@ -1723,6 +1734,30 @@ public class Session<T> {
         } catch (SQLException e) {
             log.warn("Failed to restore autoCommit", e);
         }
+    }
+
+    private String[] getEagerRelationNames() {
+        List<String> names = new ArrayList<>();
+        for (Field field : getAllFields(entityClass)) {
+            if (field.isAnnotationPresent(OneToMany.class)) {
+                if (field.getAnnotation(OneToMany.class).fetch() == FetchType.EAGER) {
+                    names.add(field.getName());
+                }
+            } else if (field.isAnnotationPresent(ManyToOne.class)) {
+                if (field.getAnnotation(ManyToOne.class).fetch() != FetchType.LAZY) {
+                    names.add(field.getName());
+                }
+            } else if (field.isAnnotationPresent(OneToOne.class)) {
+                if (field.getAnnotation(OneToOne.class).fetch() != FetchType.LAZY) {
+                    names.add(field.getName());
+                }
+            } else if (field.isAnnotationPresent(ManyToMany.class)) {
+                if (field.getAnnotation(ManyToMany.class).fetch() == FetchType.EAGER) {
+                    names.add(field.getName());
+                }
+            }
+        }
+        return names.toArray(new String[0]);
     }
 
     public QueryCache getQueryCache() {
