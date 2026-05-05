@@ -7,6 +7,8 @@ import io.github.rocketbunny727.swiftmapper.cache.StatementCache;
 import io.github.rocketbunny727.swiftmapper.config.DatasourceConfig;
 import io.github.rocketbunny727.swiftmapper.config.ConfigReader;
 import io.github.rocketbunny727.swiftmapper.config.ConnectionPool;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlRenderer;
 import io.github.rocketbunny727.swiftmapper.exception.ConnectionException;
 import io.github.rocketbunny727.swiftmapper.migration.MigrationRunner;
 import io.github.rocketbunny727.swiftmapper.utils.naming.NamingStrategy;
@@ -17,6 +19,7 @@ import lombok.Getter;
 import java.lang.reflect.Field;
 import java.lang.reflect.ParameterizedType;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -34,6 +37,10 @@ public class ConnectionManager {
     private final String password;
     @Getter
     private final StatementCache statementCache;
+    @Getter
+    private final SqlDialect dialect;
+    @Getter
+    private final SqlRenderer sqlRenderer;
     private static final SwiftLogger log = SwiftLogger.getLogger(ConnectionManager.class);
 
     private static volatile ConnectionManager instance;
@@ -58,7 +65,8 @@ public class ConnectionManager {
 
                     if (ds.migrationsLocation() != null && !ds.migrationsLocation().isBlank()) {
                         MigrationRunner runner =
-                                new MigrationRunner(manager.connectionPool.getDataSource(), ds.migrationsLocation());
+                                new MigrationRunner(manager.connectionPool.getDataSource(), ds.migrationsLocation(),
+                                        manager.getDialect());
                         try {
                             runner.runMigrations();
                         } catch (SQLException e) {
@@ -80,6 +88,19 @@ public class ConnectionManager {
         this.username = dsConfig.username();
         this.password = dsConfig.password();
         this.statementCache = new StatementCache(100);
+        this.dialect = resolveDialect(dsConfig);
+        this.sqlRenderer = new SqlRenderer(dialect);
+        log.info("Using SQL dialect: {}", dialect.name());
+    }
+
+    private SqlDialect resolveDialect(DatasourceConfig config) {
+        String productName = null;
+        try (Connection connection = connectionPool.getConnection()) {
+            productName = connection.getMetaData().getDatabaseProductName();
+        } catch (SQLException e) {
+            log.warn("Could not read database product name, resolving dialect from config/url: {}", e.getMessage());
+        }
+        return SqlDialect.resolve(config.dialect(), config.url(), config.driverClassName(), productName);
     }
 
     public Connection getConnection() throws SQLException {
@@ -124,35 +145,38 @@ public class ConnectionManager {
     private void dropTables(Connection connection, Class<?>... entityClasses) throws SQLException {
         for (int i = entityClasses.length - 1; i >= 0; i--) {
             String tableName = NamingStrategy.getTableName(entityClasses[i]);
+            String sql = dialect.dropTableIfExists(tableName);
             try (Statement stmt = connection.createStatement()) {
-                stmt.execute("DROP TABLE IF EXISTS " + qi(tableName) + " CASCADE");
+                stmt.execute(sql);
+                log.showSQL(sql);
                 log.info("Dropped table: {}", tableName);
             }
         }
     }
 
     private void validateTables(Connection connection, Class<?>... entityClasses) throws SQLException {
+        DatabaseMetaData metaData = connection.getMetaData();
         for (Class<?> entityClass : entityClasses) {
             String tableName = NamingStrategy.getTableName(entityClass);
-            String sql = "SELECT 1 FROM information_schema.tables WHERE table_name = ?";
-            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-                stmt.setString(1, tableName);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    if (!rs.next()) {
-                        throw new IllegalStateException(
-                                "ddl-auto=validate: table '" + tableName + "' not found in database");
-                    }
+            boolean exists = false;
+            try (ResultSet rs = metaData.getTables(null, null, tableName, new String[]{"TABLE"})) {
+                exists = rs.next();
+            }
+            if (!exists) {
+                try (ResultSet rs = metaData.getTables(null, null, tableName.toUpperCase(), new String[]{"TABLE"})) {
+                    exists = rs.next();
                 }
+            }
+            if (!exists) {
+                throw new IllegalStateException(
+                        "ddl-auto=validate: table '" + tableName + "' not found in database");
             }
             log.info("ddl-auto=validate: table '{}' OK", tableName);
         }
     }
 
-    private static String qi(String identifier) {
-        if (identifier == null || identifier.isEmpty()) {
-            throw new IllegalArgumentException("DDL identifier cannot be null or empty");
-        }
-        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    private String qi(String identifier) {
+        return dialect.quoteIdentifier(identifier);
     }
 
     private static void validateDdlLiteral(String value, String context) {
@@ -164,15 +188,20 @@ public class ConnectionManager {
     }
 
     private boolean constraintExists(Connection connection, String constraintName) {
-        String sql = "SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, constraintName);
-            try (ResultSet rs = stmt.executeQuery()) {
-                return rs.next();
+        try {
+            DatabaseMetaData metaData = connection.getMetaData();
+            try (ResultSet rs = metaData.getImportedKeys(null, null, null)) {
+                while (rs.next()) {
+                    String fkName = rs.getString("FK_NAME");
+                    if (constraintName.equalsIgnoreCase(fkName)) {
+                        return true;
+                    }
+                }
             }
         } catch (SQLException e) {
-            return false;
+            log.debug("Could not inspect FK metadata for {}: {}", constraintName, e.getMessage());
         }
+        return false;
     }
 
     private void createTable(Connection connection, Class<?> entityClass) throws SQLException {
@@ -215,8 +244,7 @@ public class ConnectionManager {
                 String colName = NamingStrategy.getColumnName(field);
                 String idxName = idx.name().isEmpty() ?
                         "idx_" + tableName + "_" + colName : idx.name();
-                indexes.add(String.format("CREATE %sINDEX %s ON %s(%s)",
-                        idx.unique() ? "UNIQUE " : "", qi(idxName), qi(tableName), qi(colName)));
+                indexes.add(dialect.createIndexSql(idx.unique(), idxName, tableName, colName));
             }
 
             if (field.isAnnotationPresent(Id.class)) {
@@ -242,10 +270,8 @@ public class ConnectionManager {
                         jc.referencedColumnName() : NamingStrategy.getIdColumnName(getIdField(targetClass));
 
                 String fkName = NamingStrategy.getFkConstraintName(tableName, fkColumn);
-                foreignKeys.put(fkName, String.format(
-                        "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
-                        qi(tableName), qi(fkName), qi(fkColumn), qi(targetTable), qi(referencedCol)
-                ));
+                foreignKeys.put(fkName, dialect.addForeignKeySql(
+                        tableName, fkName, fkColumn, targetTable, referencedCol, false));
             } else if (field.isAnnotationPresent(OneToOne.class)) {
                 OneToOne oo = field.getAnnotation(OneToOne.class);
                 if (oo.mappedBy().isEmpty()) {
@@ -262,10 +288,8 @@ public class ConnectionManager {
                             jc.referencedColumnName() : NamingStrategy.getIdColumnName(getIdField(targetClass));
 
                     String fkName = NamingStrategy.getFkConstraintName(tableName, fkColumn);
-                    foreignKeys.put(fkName, String.format(
-                            "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
-                            qi(tableName), qi(fkName), qi(fkColumn), qi(targetTable), qi(referencedCol)
-                    ));
+                    foreignKeys.put(fkName, dialect.addForeignKeySql(
+                            tableName, fkName, fkColumn, targetTable, referencedCol, false));
                 }
             } else if (!isRelationshipField(field)) {
                 String colName = NamingStrategy.getColumnName(field);
@@ -295,7 +319,7 @@ public class ConnectionManager {
 
                 if (field.isAnnotationPresent(Lob.class)) {
                     Lob lob = field.getAnnotation(Lob.class);
-                    sqlType = lob.type() == Lob.LobType.BLOB ? "BLOB" : "CLOB";
+                    sqlType = lob.type() == Lob.LobType.BLOB ? dialect.binaryType() : dialect.clobType();
                 }
 
                 if (field.isAnnotationPresent(Temporal.class)) {
@@ -327,18 +351,17 @@ public class ConnectionManager {
             tableConstraints.add("CONSTRAINT " + qi("chk_" + tableName) + " CHECK (" + classCheck.value() + ")");
         }
 
-        StringBuilder sql = new StringBuilder("CREATE TABLE IF NOT EXISTS ");
-        sql.append(qi(tableName)).append("(").append(String.join(", ", columns));
+        StringBuilder definition = new StringBuilder(String.join(", ", columns));
 
         if (!tableConstraints.isEmpty()) {
-            sql.append(", ").append(String.join(", ", tableConstraints));
+            definition.append(", ").append(String.join(", ", tableConstraints));
         }
 
-        sql.append(")");
+        String sql = dialect.createTableIfNotExists(tableName, definition.toString());
 
-        log.showSQL(sql.toString());
+        log.showSQL(sql);
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute(sql.toString());
+            stmt.execute(sql);
             log.info("Created table: {}", tableName);
         }
 
@@ -347,10 +370,16 @@ public class ConnectionManager {
         }
 
         for (Map.Entry<String, String> entry : foreignKeys.entrySet()) {
+            if (entry.getValue() == null || entry.getValue().isBlank()) {
+                log.warn("Skipping FK {} for dialect {}", entry.getKey(), dialect.name());
+                continue;
+            }
             if (!constraintExists(connection, entry.getKey())) {
                 try (Statement stmt = connection.createStatement()) {
                     stmt.execute(entry.getValue());
                     log.showSQL(entry.getValue());
+                } catch (UnsupportedOperationException e) {
+                    log.warn("Skipping FK {} for dialect {}: {}", entry.getKey(), dialect.name(), e.getMessage());
                 } catch (SQLException e) {
                     log.warn("Error creating FK: {}", e.getMessage());
                 }
@@ -400,12 +429,12 @@ public class ConnectionManager {
         String ownerIdType = getTargetIdSqlType(ownerClass);
         String targetIdType = getTargetIdSqlType(targetClass);
 
-        String sql = String.format(
-                "CREATE TABLE IF NOT EXISTS %s (%s %s NOT NULL, %s %s NOT NULL, PRIMARY KEY (%s, %s))",
-                qi(joinTableName),
+        String definition = String.format(
+                "%s %s NOT NULL, %s %s NOT NULL, PRIMARY KEY (%s, %s)",
                 qi(joinCol), ownerIdType,
                 qi(inverseCol), targetIdType,
                 qi(joinCol), qi(inverseCol));
+        String sql = dialect.createTableIfNotExists(joinTableName, definition);
 
         log.showSQL(sql);
         try (Statement stmt = connection.createStatement()) {
@@ -423,13 +452,17 @@ public class ConnectionManager {
     }
 
     private void addForeignKey(Connection connection, String table, String fkName, String col, String refTable, String refCol) {
+        String sql = dialect.addForeignKeySql(table, fkName, col, refTable, refCol, true);
+        if (sql == null || sql.isBlank()) {
+            log.warn("Skipping FK {} for dialect {}", fkName, dialect.name());
+            return;
+        }
         if (!constraintExists(connection, fkName)) {
-            String sql = String.format(
-                    "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s) ON DELETE CASCADE",
-                    qi(table), qi(fkName), qi(col), qi(refTable), qi(refCol));
             try (Statement stmt = connection.createStatement()) {
                 stmt.execute(sql);
                 log.showSQL(sql);
+            } catch (UnsupportedOperationException e) {
+                log.warn("Skipping FK {} for dialect {}: {}", fkName, dialect.name(), e.getMessage());
             } catch (SQLException e) {
                 log.warn("Error creating FK {}: {}", fkName, e.getMessage());
             }
@@ -450,19 +483,10 @@ public class ConnectionManager {
         GeneratedValue gen = idField.getAnnotation(GeneratedValue.class);
 
         if (gen != null && gen.strategy() == Strategy.PATTERN) {
-            return "VARCHAR(100)";
+            return dialect.stringType(100);
         }
 
-        Class<?> type = idField.getType();
-        if (type == String.class) {
-            return "VARCHAR(255)";
-        } else if (type == Long.class || type == long.class) {
-            return "BIGINT";
-        } else if (type == Integer.class || type == int.class) {
-            return "INTEGER";
-        }
-
-        return "BIGINT";
+        return dialect.sqlType(idField.getType());
     }
 
     private boolean isRelationshipField(Field field) {
@@ -473,24 +497,15 @@ public class ConnectionManager {
     }
 
     private String createIdColumnDefinition(String idColumn, Field idField, GeneratedValue gen) {
-        String sqlType = getSqlType(idField, true, gen);
-
-        if (gen != null && gen.strategy() == Strategy.PATTERN) {
-            return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
-        } else if (gen != null && gen.strategy() == Strategy.IDENTITY) {
-            return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
-        } else if (gen != null) {
-            return qi(idColumn) + " BIGINT PRIMARY KEY";
-        }
-        return qi(idColumn) + " " + sqlType + " PRIMARY KEY";
+        return dialect.idColumnDefinition(idColumn, idField.getType(), gen);
     }
 
     private void createSequence(Connection connection, String tableName, String idColumn, long startValue) throws SQLException {
         String seqName = NamingStrategy.getSequenceName(tableName, idColumn);
 
-        String checkSql = "SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = ?";
+        String checkSql = dialect.sequenceExistsSql();
         try (PreparedStatement stmt = connection.prepareStatement(checkSql)) {
-            stmt.setString(1, seqName);
+            stmt.setString(1, dialect.sequenceLookupValue(seqName));
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
                     log.info("Sequence {} already exists, skipping creation", seqName);
@@ -499,10 +514,7 @@ public class ConnectionManager {
             }
         }
 
-        String createSql = String.format(
-                "CREATE SEQUENCE %s START WITH %d INCREMENT BY 1 NO MINVALUE NO MAXVALUE OWNED BY %s.%s",
-                qi(seqName), startValue, qi(tableName), qi(idColumn)
-        );
+        String createSql = dialect.createSequenceSql(seqName, tableName, idColumn, startValue);
 
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createSql);
@@ -527,18 +539,16 @@ public class ConnectionManager {
         Class<?> type = field.getType();
 
         if (isId && gen != null && gen.strategy() == Strategy.PATTERN) {
-            return "VARCHAR(100)";
+            return dialect.stringType(100);
         }
 
         if (isId && gen != null && gen.strategy() == Strategy.IDENTITY) {
-            return type == Long.class || type == long.class ?
-                    "BIGINT GENERATED BY DEFAULT AS IDENTITY" :
-                    "INTEGER GENERATED BY DEFAULT AS IDENTITY";
+            return dialect.identityColumnType(type);
         }
 
         if (field.isAnnotationPresent(Lob.class)) {
             Lob lob = field.getAnnotation(Lob.class);
-            return lob.type() == Lob.LobType.BLOB ? "BLOB" : "CLOB";
+            return lob.type() == Lob.LobType.BLOB ? dialect.binaryType() : dialect.clobType();
         }
 
         if (field.isAnnotationPresent(Temporal.class)) {
@@ -550,18 +560,7 @@ public class ConnectionManager {
             };
         }
 
-        return switch (type.getSimpleName()) {
-            case "Long", "long" -> "BIGINT";
-            case "Integer", "int" -> "INTEGER";
-            case "Double", "double" -> "DOUBLE PRECISION";
-            case "Float", "float" -> "REAL";
-            case "Boolean", "boolean" -> "BOOLEAN";
-            case "LocalDateTime" -> "TIMESTAMP";
-            case "LocalDate" -> "DATE";
-            case "LocalTime" -> "TIME";
-            case "byte[]", "Byte[]" -> "BYTEA";
-            default -> "VARCHAR(255)";
-        };
+        return dialect.sqlType(type);
     }
 
     public void close() {

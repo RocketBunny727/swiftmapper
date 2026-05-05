@@ -4,6 +4,7 @@ swiftmapper:
     username: postgres
     password: 471979
     driver-class-name: org.postgresql.Driver
+    dialect: postgresql
 
   migrations:
     location: db/migrations

@@ -3,6 +3,7 @@ package io.github.rocketbunny727.swiftmapper.query;
 import io.github.rocketbunny727.swiftmapper.annotations.entity.Id;
 import io.github.rocketbunny727.swiftmapper.annotations.entity.Table;
 import io.github.rocketbunny727.swiftmapper.core.EntityMapper;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
 import io.github.rocketbunny727.swiftmapper.query.model.*;
 import io.github.rocketbunny727.swiftmapper.utils.converters.CamelToSnakeConverter;
 import io.github.rocketbunny727.swiftmapper.utils.logger.SwiftLogger;
@@ -19,6 +20,7 @@ import java.util.regex.Pattern;
 public class QueryMethodParser {
     private static final SwiftLogger log = SwiftLogger.getLogger(QueryMethodParser.class);
     private final EntityMapper<?> mapper;
+    private final SqlDialect dialect;
 
     private static final Pattern METHOD_PATTERN = Pattern.compile(
             "^(find|findAll|findFirst|findTop|count|delete|exists)(\\d*)(By)(.*)$"
@@ -68,7 +70,12 @@ public class QueryMethodParser {
     );
 
     public QueryMethodParser(EntityMapper<?> mapper) {
+        this(mapper, SqlDialect.GENERIC);
+    }
+
+    public QueryMethodParser(EntityMapper<?> mapper, SqlDialect dialect) {
         this.mapper = mapper;
+        this.dialect = dialect != null ? dialect : SqlDialect.GENERIC;
     }
 
     private static String escapeLikePattern(Object arg) {
@@ -136,11 +143,15 @@ public class QueryMethodParser {
                 || isOptionalReturnType(method)
                 || isDirectEntityReturnType(method);
 
+        Integer limit = null;
         if (operation.equals("findFirst") || (operation.equals("findTop") && !topCount.isEmpty())) {
-            int limit = topCount.isEmpty() ? 1 : Integer.parseInt(topCount);
-            sql.append(" LIMIT ").append(limit);
+            limit = topCount.isEmpty() ? 1 : Integer.parseInt(topCount);
         } else if (isSingleResult && queryType == QueryType.SELECT) {
-            sql.append(" LIMIT 1");
+            limit = 1;
+        }
+
+        if (limit != null) {
+            sql = new StringBuilder(dialect.applyLimitOffset(sql.toString(), limit, null));
         }
 
         String finalSql = sql.toString();
@@ -164,7 +175,7 @@ public class QueryMethodParser {
         if (identifier == null) {
             return null;
         }
-        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+        return dialect.quoteIdentifier(identifier);
     }
 
     private WhereClause parseWhereClause(String conditions, Object[] args, List<JoinInfo> joins) {
@@ -297,6 +308,12 @@ public class QueryMethodParser {
     private int buildCondition(StringBuilder sql, List<ParameterBinding> bindings,
                                Object[] args, String columnName, TokenPattern operator, int argIndex) {
         if (operator.params() == 0) {
+            if ("True".equals(operator.name()) || "False".equals(operator.name())) {
+                sql.append(columnName)
+                        .append(" = ")
+                        .append(dialect.booleanLiteral("True".equals(operator.name())));
+                return 0;
+            }
             sql.append(columnName).append(operator.sql());
             return 0;
         }
@@ -326,7 +343,11 @@ public class QueryMethodParser {
             return 1;
         }
 
-        sql.append(columnName).append(operator.sql());
+        if ("Regex".equals(operator.name())) {
+            sql.append(dialect.regexCondition(columnName));
+        } else {
+            sql.append(columnName).append(operator.sql());
+        }
         int paramsNeeded = operator.params();
 
         for (int j = 0; j < paramsNeeded; j++) {

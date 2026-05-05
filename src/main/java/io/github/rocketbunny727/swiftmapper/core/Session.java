@@ -6,6 +6,8 @@ import io.github.rocketbunny727.swiftmapper.cache.QueryCache;
 import io.github.rocketbunny727.swiftmapper.cache.StatementCache;
 import io.github.rocketbunny727.swiftmapper.cascade.CascadeHandler;
 import io.github.rocketbunny727.swiftmapper.config.ConfigReader;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlRenderer;
 import io.github.rocketbunny727.swiftmapper.exception.EntityNotFoundException;
 import io.github.rocketbunny727.swiftmapper.exception.MappingException;
 import io.github.rocketbunny727.swiftmapper.exception.QueryException;
@@ -47,6 +49,8 @@ public class Session<T> {
 
     private final ConnectionManager connectionManager;
     private final Class<T> entityClass;
+    private final SqlDialect configuredDialect;
+    private final SqlRenderer sqlRenderer;
     private final SwiftLogger log = SwiftLogger.getLogger(Session.class);
     @Getter
     private final QueryLogger queryLogger;
@@ -68,6 +72,8 @@ public class Session<T> {
     public Session(ConnectionManager connectionManager, Class<T> entityClass) {
         this.connectionManager = connectionManager;
         this.entityClass = entityClass;
+        this.configuredDialect = connectionManager != null ? connectionManager.getDialect() : SqlDialect.GENERIC;
+        this.sqlRenderer = new SqlRenderer(this.configuredDialect);
         this.statementCache = connectionManager.getStatementCache();
         this.queryLogger = new QueryLogger();
         this.metricsCollector = MetricsCollector.getInstance();
@@ -86,6 +92,8 @@ public class Session<T> {
     public Session(Connection connection, Class<T> entityClass) {
         this.connectionManager = null;
         this.entityClass = entityClass;
+        this.configuredDialect = SqlDialect.GENERIC;
+        this.sqlRenderer = new SqlRenderer(this.configuredDialect);
         this.dedicatedConnection = connection;
         this.externalConnection = true;
         this.statementCache = null;
@@ -147,14 +155,21 @@ public class Session<T> {
         }
     }
 
+    private SqlDialect dialect(Connection connection) throws SQLException {
+        if (connectionManager != null) {
+            return connectionManager.getDialect();
+        }
+        if (configuredDialect != SqlDialect.GENERIC) {
+            return configuredDialect;
+        }
+        String productName = connection.getMetaData().getDatabaseProductName();
+        return SqlDialect.resolve(null, null, null, productName);
+    }
+
     public Optional<T> findById(Object id) throws SQLException {
         log.info("Finding {} by id: {}", entityClass.getSimpleName(), id);
 
-        String sql = String.format(
-                "SELECT * FROM %s WHERE %s = ?",
-                getTableName(),
-                getIdColumn()
-        );
+        String sql = sqlRenderer.selectById(getTableName(), getIdColumn());
 
         if (cacheEnabled) {
             String cacheKey = entityClass.getName() + ":findById:" + id;
@@ -174,7 +189,7 @@ public class Session<T> {
         Connection conn = acquireConnection();
 
         try {
-            List<T> result = executeQuery(conn, sql, id);
+            List<T> result = applyConfiguredEagerLoading(conn, executeQuery(conn, sql, id));
 
             Duration duration = Duration.between(start, Instant.now());
             queryLogger.logQueryEnd(logEntry, result.size(), null);
@@ -183,11 +198,6 @@ public class Session<T> {
             if (result.isEmpty()) {
                 log.warn("Entity not found by id: {}", id);
                 return Optional.empty();
-            }
-
-            String[] eagerRelations = getEagerRelationNames();
-            if (eagerRelations.length > 0) {
-                EagerLoader.batchLoad(result, entityClass, conn, connectionManager, eagerRelations);
             }
 
             if (cacheEnabled) {
@@ -222,8 +232,7 @@ public class Session<T> {
     private T executeInsert(Connection connection, Object entity,
                             Field idField, boolean generatedOnDb) throws SQLException, IllegalAccessException {
         String tableName = getTableName();
-        StringBuilder columns = new StringBuilder();
-        StringBuilder placeholders = new StringBuilder();
+        List<String> columns = new ArrayList<>();
         List<Object> params = new ArrayList<>();
 
         for (Field field : getAllFields(entityClass)) {
@@ -245,8 +254,7 @@ public class Session<T> {
                         Object relatedId = getEntityId(relatedEntity);
                         if (relatedId != null) {
                             String fkColumn = NamingStrategy.getForeignKeyColumn(field);
-                            columns.append(fkColumn).append(",");
-                            placeholders.append("?,");
+                            columns.add(fkColumn);
                             params.add(relatedId);
                         }
                     }
@@ -258,8 +266,7 @@ public class Session<T> {
                             Object relatedId = getEntityId(relatedEntity);
                             if (relatedId != null) {
                                 String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
-                                columns.append(fkColumn).append(",");
-                                placeholders.append("?,");
+                                columns.add(fkColumn);
                                 params.add(relatedId);
                             }
                         }
@@ -272,13 +279,12 @@ public class Session<T> {
             String colName = NamingStrategy.getColumnName(field);
             Object value = field.get(entity);
 
-            columns.append(colName).append(",");
-            placeholders.append("?,");
+            columns.add(colName);
             params.add(value);
         }
 
         if (columns.isEmpty()) {
-            String sql = String.format("INSERT INTO %s DEFAULT VALUES", tableName);
+            String sql = dialect(connection).defaultValuesInsert(tableName);
             log.showSQL(sql);
 
             QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
@@ -303,10 +309,7 @@ public class Session<T> {
             }
         }
 
-        columns.setLength(columns.length() - 1);
-        placeholders.setLength(placeholders.length() - 1);
-
-        String sql = String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columns, placeholders);
+        String sql = sqlRenderer.insert(tableName, columns);
         log.showSQL(sql, params.toArray());
         QueryLogEntry logEntry = queryLogger.logQueryStart(sql, params.toArray());
 
@@ -403,7 +406,7 @@ public class Session<T> {
                     String ownerCol = NamingStrategy.getJoinColumnName(jt, entityClass, true);
                     String inverseCol = NamingStrategy.getJoinColumnName(jt, targetClass, false);
 
-                    String deleteSql = String.format("DELETE FROM %s WHERE %s = ?", joinTableName, ownerCol);
+                    String deleteSql = sqlRenderer.deleteWhere(joinTableName, ownerCol);
                     QueryLogEntry deleteLog = queryLogger.logQueryStart(deleteSql, ownerId);
                     try (PreparedStatement deleteStmt = connection.prepareStatement(deleteSql)) {
                         deleteStmt.setQueryTimeout(queryTimeout);
@@ -417,7 +420,7 @@ public class Session<T> {
 
                     java.util.Collection<?> relatedItems = (java.util.Collection<?>) field.get(entity);
                     if (relatedItems != null && !relatedItems.isEmpty()) {
-                        String insertSql = String.format("INSERT INTO %s (%s, %s) VALUES (?, ?)", joinTableName, ownerCol, inverseCol);
+                        String insertSql = sqlRenderer.insert(joinTableName, List.of(ownerCol, inverseCol));
                         QueryLogEntry insertLog = queryLogger.logQueryStart(insertSql);
                         try (PreparedStatement insertStmt = connection.prepareStatement(insertSql)) {
                             insertStmt.setQueryTimeout(queryTimeout);
@@ -656,8 +659,7 @@ public class Session<T> {
 
     private String buildBatchInsertSql(List<Field> orderedFields) {
         String tableName = getTableName();
-        StringBuilder columns = new StringBuilder();
-        StringBuilder placeholders = new StringBuilder();
+        List<String> columns = new ArrayList<>();
 
         for (Field field : orderedFields) {
             String colName;
@@ -670,22 +672,15 @@ public class Session<T> {
                 colName = NamingStrategy.getColumnName(field);
             }
 
-            columns.append(colName).append(",");
-            placeholders.append("?,");
+            columns.add(colName);
         }
 
-        if (columns.length() > 0) {
-            columns.setLength(columns.length() - 1);
-            placeholders.setLength(placeholders.length() - 1);
-        }
-
-        return String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columns, placeholders);
+        return sqlRenderer.insert(tableName, columns);
     }
 
     private String buildBatchInsertSql() {
         String tableName = getTableName();
-        StringBuilder columns = new StringBuilder();
-        StringBuilder placeholders = new StringBuilder();
+        List<String> columns = new ArrayList<>();
 
         for (Field field : getAllFields(entityClass)) {
             field.setAccessible(true);
@@ -701,23 +696,16 @@ public class Session<T> {
                     String fkColumn = field.isAnnotationPresent(ManyToOne.class)
                             ? NamingStrategy.getForeignKeyColumn(field)
                             : NamingStrategy.getOneToOneFkColumn(field);
-                    columns.append(fkColumn).append(",");
-                    placeholders.append("?,");
+                    columns.add(fkColumn);
                 }
                 continue;
             }
 
             String colName = NamingStrategy.getColumnName(field);
-            columns.append(colName).append(",");
-            placeholders.append("?,");
+            columns.add(colName);
         }
 
-        if (columns.length() > 0) {
-            columns.setLength(columns.length() - 1);
-            placeholders.setLength(placeholders.length() - 1);
-        }
-
-        return String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columns, placeholders);
+        return sqlRenderer.insert(tableName, columns);
     }
 
     private Map<Field, Integer> getFieldIndicesForBatch() {
@@ -940,7 +928,7 @@ public class Session<T> {
 
     private String buildBatchUpdateSql() {
         String tableName = getTableName();
-        StringBuilder setClause = new StringBuilder();
+        List<String> columns = new ArrayList<>();
 
         for (Field field : getAllFields(entityClass)) {
             field.setAccessible(true);
@@ -949,26 +937,22 @@ public class Session<T> {
             if (isRelationshipField(field)) {
                 if (field.isAnnotationPresent(ManyToOne.class)) {
                     String fkColumn = NamingStrategy.getForeignKeyColumn(field);
-                    setClause.append(fkColumn).append(" = ?,");
+                    columns.add(fkColumn);
                 } else if (field.isAnnotationPresent(OneToOne.class)) {
                     OneToOne oo = field.getAnnotation(OneToOne.class);
                     if (oo.mappedBy().isEmpty()) {
                         String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
-                        setClause.append(fkColumn).append(" = ?,");
+                        columns.add(fkColumn);
                     }
                 }
                 continue;
             }
 
             String colName = NamingStrategy.getColumnName(field);
-            setClause.append(colName).append(" = ?,");
+            columns.add(colName);
         }
 
-        if (setClause.length() > 0) {
-            setClause.setLength(setClause.length() - 1);
-        }
-
-        return String.format("UPDATE %s SET %s WHERE %s = ?", tableName, setClause, getIdColumn());
+        return sqlRenderer.updateById(tableName, columns, getIdColumn());
     }
 
     public void updateInternal(Connection connection, Object entity, Set<Object> visited) throws SQLException {
@@ -983,7 +967,7 @@ public class Session<T> {
             throw new SQLException("Cascade merge failed", e);
         }
 
-        StringBuilder setClause = new StringBuilder();
+        List<String> columns = new ArrayList<>();
         List<Object> params = new ArrayList<>();
         Object idValue = null;
 
@@ -998,30 +982,30 @@ public class Session<T> {
                     if (field.isAnnotationPresent(ManyToOne.class)) {
                         Object relatedEntity = field.get(entity);
                         if (relatedEntity != null) {
-                            Object relatedId = getEntityId(relatedEntity);
-                            if (relatedId != null) {
-                                String fkColumn = NamingStrategy.getForeignKeyColumn(field);
-                                setClause.append(fkColumn).append(" = ?, ");
-                                params.add(relatedId);
-                            }
+                                Object relatedId = getEntityId(relatedEntity);
+                                if (relatedId != null) {
+                                    String fkColumn = NamingStrategy.getForeignKeyColumn(field);
+                                    columns.add(fkColumn);
+                                    params.add(relatedId);
+                                }
                         }
                     } else if (field.isAnnotationPresent(OneToOne.class)) {
                         OneToOne oo = field.getAnnotation(OneToOne.class);
                         if (oo.mappedBy().isEmpty()) {
                             Object relatedEntity = field.get(entity);
                             if (relatedEntity != null) {
-                                Object relatedId = getEntityId(relatedEntity);
-                                if (relatedId != null) {
-                                    String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
-                                    setClause.append(fkColumn).append(" = ?, ");
-                                    params.add(relatedId);
-                                }
+                                    Object relatedId = getEntityId(relatedEntity);
+                                    if (relatedId != null) {
+                                        String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
+                                        columns.add(fkColumn);
+                                        params.add(relatedId);
+                                    }
                             }
                         }
                     }
                     continue;
                 } else {
-                    setClause.append(NamingStrategy.getColumnName(field)).append(" = ?, ");
+                    columns.add(NamingStrategy.getColumnName(field));
                     params.add(field.get(entity));
                 }
             } catch (IllegalAccessException e) {
@@ -1029,13 +1013,11 @@ public class Session<T> {
             }
         }
 
-        if (setClause.length() == 0) {
+        if (columns.isEmpty()) {
             throw new QueryException("No fields to update", null);
         }
 
-        setClause.delete(setClause.length() - 2, setClause.length());
-        String sql = String.format("UPDATE %s SET %s WHERE %s = ?",
-                getTableName(), setClause, getIdColumn());
+        String sql = sqlRenderer.updateById(getTableName(), columns, getIdColumn());
         params.add(idValue);
 
         log.showSQL(sql, params.toArray());
@@ -1097,7 +1079,7 @@ public class Session<T> {
             String ownerCol = NamingStrategy.getJoinColumnName(jt, entityClass, true);
             String inverseCol = NamingStrategy.getJoinColumnName(jt, targetClass, false);
 
-            String deleteSql = String.format("DELETE FROM %s WHERE %s = ?", joinTableName, ownerCol);
+            String deleteSql = sqlRenderer.deleteWhere(joinTableName, ownerCol);
             QueryLogEntry deleteLog = queryLogger.logQueryStart(deleteSql, ownerId);
             try (PreparedStatement deleteStmt = connection.prepareStatement(deleteSql)) {
                 deleteStmt.setQueryTimeout(queryTimeout);
@@ -1113,7 +1095,7 @@ public class Session<T> {
             @SuppressWarnings("unchecked")
             java.util.Collection<Object> relatedItems = (java.util.Collection<Object>) field.get(entity);
             if (relatedItems != null && !relatedItems.isEmpty()) {
-                String insertSql = String.format("INSERT INTO %s (%s, %s) VALUES (?, ?)", joinTableName, ownerCol, inverseCol);
+                String insertSql = sqlRenderer.insert(joinTableName, List.of(ownerCol, inverseCol));
                 QueryLogEntry insertLog = queryLogger.logQueryStart(insertSql);
                 try (PreparedStatement insertStmt = connection.prepareStatement(insertSql)) {
                     insertStmt.setQueryTimeout(queryTimeout);
@@ -1240,7 +1222,7 @@ public class Session<T> {
                 conn.setAutoCommit(false);
             }
 
-            String sql = String.format("DELETE FROM %s WHERE %s = ?", getTableName(), getIdColumn());
+            String sql = sqlRenderer.deleteWhere(getTableName(), getIdColumn());
             QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
 
             try (PreparedStatement stmt = conn.prepareStatement(sql)) {
@@ -1308,7 +1290,7 @@ public class Session<T> {
             }
         }
 
-        String sql = String.format("DELETE FROM %s WHERE %s = ?", getTableName(), getIdColumn());
+        String sql = sqlRenderer.deleteWhere(getTableName(), getIdColumn());
         log.showSQL(sql, id);
         QueryLogEntry logEntry = queryLogger.logQueryStart(sql, id);
 
@@ -1344,18 +1326,14 @@ public class Session<T> {
     }
 
     private Optional<T> findByIdInternal(Connection connection, Object id) throws SQLException {
-        String sql = String.format(
-                "SELECT * FROM %s WHERE %s = ?",
-                getTableName(),
-                getIdColumn()
-        );
+        String sql = sqlRenderer.selectById(getTableName(), getIdColumn());
         List<T> result = executeQuery(connection, sql, id);
         return result.isEmpty() ? Optional.empty() : Optional.of(result.get(0));
     }
 
     public List<T> findAll() throws SQLException {
         log.info("Finding all {}", entityClass.getSimpleName());
-        String sql = "SELECT * FROM " + getTableName();
+        String sql = sqlRenderer.selectAll(getTableName());
 
         if (cacheEnabled) {
             String cacheKey = entityClass.getName() + ":findAll";
@@ -1372,13 +1350,8 @@ public class Session<T> {
         Instant start = Instant.now();
 
         try {
-            List<T> result = executeQuery(conn, sql);
+            List<T> result = applyConfiguredEagerLoading(conn, executeQuery(conn, sql));
             queryLogger.logQueryEnd(logEntry, result.size(), null);
-
-            String[] eagerRelations = getEagerRelationNames();
-            if (!result.isEmpty() && eagerRelations.length > 0) {
-                EagerLoader.batchLoad(result, entityClass, conn, connectionManager, eagerRelations);
-            }
 
             metricsCollector.recordQuery("findAll", Duration.between(start, Instant.now()), true);
 
@@ -1415,7 +1388,7 @@ public class Session<T> {
         Instant start = Instant.now();
 
         try {
-            List<T> result = executeQuery(conn, sql, params);
+            List<T> result = applyConfiguredEagerLoading(conn, executeQuery(conn, sql, params));
             queryLogger.logQueryEnd(logEntry, result.size(), null);
             metricsCollector.recordQuery("query", Duration.between(start, Instant.now()), true);
 
@@ -1498,6 +1471,20 @@ public class Session<T> {
         return result;
     }
 
+    private List<T> applyConfiguredEagerLoading(Connection connection, List<T> result) throws SQLException {
+        if (result == null || result.isEmpty()) {
+            return result;
+        }
+
+        String[] eagerRelations = getEagerRelationNames();
+        if (eagerRelations.length == 0) {
+            return result;
+        }
+
+        EagerLoader.batchLoad(result, entityClass, connection, connectionManager, eagerRelations);
+        return result;
+    }
+
     private void setParameter(PreparedStatement stmt, int index, Object value) throws SQLException {
         if (value instanceof List<?> list) {
             Object[] array = list.toArray();
@@ -1531,93 +1518,26 @@ public class Session<T> {
 
     private long nextSequenceValue(Connection connection, String tableName, String idColumn, long startValue) throws SQLException {
         String seqName = NamingStrategy.getSequenceName(tableName, idColumn);
-        String dbName = connection.getMetaData().getDatabaseProductName().toLowerCase();
-        boolean isPostgres = dbName.contains("postgresql");
-        boolean isH2 = dbName.contains("h2");
-
-        if (isPostgres) {
-            return nextPostgresSequence(connection, seqName, tableName, idColumn, startValue);
-        } else if (isH2) {
-            return nextH2Sequence(connection, seqName, tableName, idColumn, startValue);
-        } else {
-            return nextGenericSequence(connection, seqName, startValue);
-        }
-    }
-
-    private long nextPostgresSequence(Connection connection, String seqName, String tableName, String idColumn, long startValue) throws SQLException {
-        String checkSql = "SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = ?";
+        SqlDialect sqlDialect = dialect(connection);
+        String checkSql = sqlDialect.sequenceExistsSql();
         boolean exists = false;
 
         try (PreparedStatement stmt = connection.prepareStatement(checkSql)) {
-            stmt.setString(1, seqName);
+            stmt.setString(1, sqlDialect.sequenceLookupValue(seqName));
             try (ResultSet rs = stmt.executeQuery()) {
                 exists = rs.next();
             }
         }
 
         if (!exists) {
-            String createSql = String.format(
-                    "CREATE SEQUENCE %s START WITH %d OWNED BY %s.%s",
-                    seqName, startValue, tableName, idColumn
-            );
+            String createSql = sqlDialect.createSequenceSql(seqName, tableName, idColumn, startValue);
             try (Statement stmt = connection.createStatement()) {
                 stmt.execute(createSql);
+                log.showSQL(createSql);
             }
         }
 
-        String sql = String.format("SELECT nextval('%s')", seqName);
-        QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
-        try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            if (rs.next()) {
-                queryLogger.logQueryEnd(logEntry, 1, null);
-                return rs.getLong(1);
-            }
-        } catch (SQLException e) {
-            queryLogger.logQueryEnd(logEntry, 0, e);
-            throw e;
-        }
-        throw new SQLException("Could not increment sequence: " + seqName);
-    }
-
-    private long nextH2Sequence(Connection connection, String seqName, String tableName, String idColumn, long startValue) throws SQLException {
-        String checkSql = "SELECT 1 FROM INFORMATION_SCHEMA.SEQUENCES WHERE SEQUENCE_NAME = ?";
-        boolean exists = false;
-
-        try (PreparedStatement stmt = connection.prepareStatement(checkSql)) {
-            stmt.setString(1, seqName.toUpperCase());
-            try (ResultSet rs = stmt.executeQuery()) {
-                exists = rs.next();
-            }
-        }
-
-        if (!exists) {
-            String createSql = String.format(
-                    "CREATE SEQUENCE %s START WITH %d",
-                    seqName, startValue
-            );
-            try (Statement stmt = connection.createStatement()) {
-                stmt.execute(createSql);
-            }
-        }
-
-        String sql = String.format("SELECT NEXT VALUE FOR %s", seqName);
-        QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
-        try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            if (rs.next()) {
-                queryLogger.logQueryEnd(logEntry, 1, null);
-                return rs.getLong(1);
-            }
-        } catch (SQLException e) {
-            queryLogger.logQueryEnd(logEntry, 0, e);
-            throw e;
-        }
-        throw new SQLException("Could not increment sequence: " + seqName);
-    }
-
-    private long nextGenericSequence(Connection connection, String seqName, long startValue) throws SQLException {
-        String sql = String.format("SELECT NEXT VALUE FOR %s", seqName);
+        String sql = sqlDialect.nextSequenceValueSql(seqName);
         QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
@@ -1648,17 +1568,9 @@ public class Session<T> {
             long startValue = ValueSpec.parse(gen.value(), gen.strategy()).sequenceStart();
 
             Connection conn = acquireConnection();
-            String dbName = conn.getMetaData().getDatabaseProductName().toLowerCase();
-            boolean isH2 = dbName.contains("h2");
 
             try {
-                String quotedSeq = "\"" + seqName.replace("\"", "\"\"") + "\"";
-                String sql;
-                if (isH2) {
-                    sql = String.format("ALTER SEQUENCE %s RESTART WITH %d INCREMENT BY 1", quotedSeq, startValue);
-                } else {
-                    sql = String.format("ALTER SEQUENCE %s RESTART WITH %d", quotedSeq, startValue);
-                }
+                String sql = dialect(conn).restartSequenceSql(seqName, startValue);
 
                 QueryLogger.QueryLogEntry logEntry = queryLogger.logQueryStart(sql);
                 try (Statement stmt = conn.createStatement()) {

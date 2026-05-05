@@ -2,6 +2,7 @@ package io.github.rocketbunny727.swiftmapper.criteria;
 
 import io.github.rocketbunny727.swiftmapper.criteria.model.BuiltQuery;
 import io.github.rocketbunny727.swiftmapper.criteria.model.CriteriaQuery;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
 import io.github.rocketbunny727.swiftmapper.utils.naming.NamingStrategy;
 
 import java.util.ArrayList;
@@ -24,8 +25,12 @@ public class CriteriaBuilder<T> {
     );
 
     public CriteriaBuilder(Class<T> entityClass) {
+        this(entityClass, SqlDialect.GENERIC);
+    }
+
+    public CriteriaBuilder(Class<T> entityClass, SqlDialect dialect) {
         this.entityClass = entityClass;
-        this.sqlBuilder = new SQLQueryBuilder();
+        this.sqlBuilder = new SQLQueryBuilder(dialect);
     }
 
     private String validateAndEscapeProperty(String property) {
@@ -48,13 +53,7 @@ public class CriteriaBuilder<T> {
             throw new IllegalArgumentException("Invalid property name format: " + property);
         }
 
-        String[] parts = property.split("\\.");
-        StringBuilder escaped = new StringBuilder();
-        for (int i = 0; i < parts.length; i++) {
-            if (i > 0) escaped.append(".");
-            escaped.append("\"").append(parts[i].replace("\"", "\"\"")).append("\"");
-        }
-        return escaped.toString();
+        return property;
     }
 
     public CriteriaBuilder<T> equal(String property, Object value) {

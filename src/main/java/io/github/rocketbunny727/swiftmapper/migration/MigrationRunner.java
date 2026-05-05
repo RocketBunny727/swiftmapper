@@ -1,5 +1,7 @@
 package io.github.rocketbunny727.swiftmapper.migration;
 
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlRenderer;
 import io.github.rocketbunny727.swiftmapper.utils.logger.SwiftLogger;
 
 import javax.sql.DataSource;
@@ -33,18 +35,32 @@ public class MigrationRunner {
     private final boolean checksumVerification;
     private final int maxRetries;
     private final long retryDelayMs;
+    private final SqlDialect dialect;
+    private final SqlRenderer sql;
 
     public MigrationRunner(DataSource dataSource, String migrationLocation) {
-        this(dataSource, migrationLocation, true, 3, 1000);
+        this(dataSource, migrationLocation, SqlDialect.GENERIC);
+    }
+
+    public MigrationRunner(DataSource dataSource, String migrationLocation, SqlDialect dialect) {
+        this(dataSource, migrationLocation, true, 3, 1000, dialect);
     }
 
     public MigrationRunner(DataSource dataSource, String migrationLocation,
                            boolean checksumVerification, int maxRetries, long retryDelayMs) {
+        this(dataSource, migrationLocation, checksumVerification, maxRetries, retryDelayMs, SqlDialect.GENERIC);
+    }
+
+    public MigrationRunner(DataSource dataSource, String migrationLocation,
+                           boolean checksumVerification, int maxRetries, long retryDelayMs,
+                           SqlDialect dialect) {
         this.dataSource = Objects.requireNonNull(dataSource, "DataSource cannot be null");
         this.migrationLocation = Objects.requireNonNull(migrationLocation, "Migration location cannot be null");
         this.checksumVerification = checksumVerification;
         this.maxRetries = maxRetries;
         this.retryDelayMs = retryDelayMs;
+        this.dialect = dialect != null ? dialect : SqlDialect.GENERIC;
+        this.sql = new SqlRenderer(this.dialect);
     }
 
     public MigrationResult runMigrations() throws SQLException {
@@ -173,78 +189,17 @@ public class MigrationRunner {
     private MigrationLock acquireLock(Connection connection) throws SQLException {
         try {
             String lockId = "swiftmapper_migration_lock";
-            DatabaseType dbType = detectDatabaseType(connection);
-
-            if (dbType == DatabaseType.POSTGRESQL) {
-                return acquirePostgresLock(connection, lockId);
-            } else if (dbType == DatabaseType.MYSQL) {
-                return acquireMySqlLock(connection, lockId);
-            } else {
-                return acquireGenericLock(connection, lockId);
-            }
+            return acquireGenericLock(connection, lockId);
         } catch (SQLException e) {
             log.error("Failed to acquire migration lock", e);
             return null;
         }
     }
 
-    private DatabaseType detectDatabaseType(Connection connection) throws SQLException {
-        String dbName = connection.getMetaData().getDatabaseProductName().toLowerCase();
-        if (dbName.contains("postgresql")) return DatabaseType.POSTGRESQL;
-        if (dbName.contains("mysql")) return DatabaseType.MYSQL;
-        if (dbName.contains("h2")) return DatabaseType.H2;
-        return DatabaseType.OTHER;
-    }
-
-    private MigrationLock acquirePostgresLock(Connection connection, String lockId) throws SQLException {
-        String sql = """
-            INSERT INTO swiftmapper_migration_locks (lock_id, acquired_at, process_info)
-            VALUES (?, ?, ?)
-            ON CONFLICT (lock_id) DO NOTHING
-            RETURNING acquired_at
-            """;
-
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, lockId);
-            stmt.setTimestamp(2, Timestamp.from(Instant.now()));
-            stmt.setString(3, getProcessInfo());
-
-            try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    return new MigrationLock(lockId, rs.getTimestamp(1).toInstant());
-                }
-            }
-        }
-
-        return checkAndBreakStaleLock(connection, lockId);
-    }
-
-    private MigrationLock acquireMySqlLock(Connection connection, String lockId) throws SQLException {
-        String sql = """
-            INSERT IGNORE INTO swiftmapper_migration_locks (lock_id, acquired_at, process_info)
-            VALUES (?, ?, ?)
-            """;
-
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, lockId);
-            stmt.setTimestamp(2, Timestamp.from(Instant.now()));
-            stmt.setString(3, getProcessInfo());
-
-            int rows = stmt.executeUpdate();
-            if (rows > 0) {
-                return new MigrationLock(lockId, Instant.now());
-            }
-        }
-
-        return checkAndBreakStaleLock(connection, lockId);
-    }
-
     private MigrationLock acquireGenericLock(Connection connection, String lockId) throws SQLException {
         try {
-            String insertSql = """
-                INSERT INTO swiftmapper_migration_locks (lock_id, acquired_at, process_info)
-                VALUES (?, ?, ?)
-                """;
+            String insertSql = sql.insert("swiftmapper_migration_locks",
+                    List.of("lock_id", "acquired_at", "process_info"));
 
             try (PreparedStatement stmt = connection.prepareStatement(insertSql)) {
                 stmt.setString(1, lockId);
@@ -259,7 +214,8 @@ public class MigrationRunner {
     }
 
     private MigrationLock checkAndBreakStaleLock(Connection connection, String lockId) throws SQLException {
-        String checkSql = "SELECT acquired_at, process_info FROM swiftmapper_migration_locks WHERE lock_id = ?";
+        String checkSql = sql.selectColumnsWhereEquals("swiftmapper_migration_locks",
+                List.of("acquired_at", "process_info"), "lock_id");
         try (PreparedStatement stmt = connection.prepareStatement(checkSql)) {
             stmt.setString(1, lockId);
             try (ResultSet rs = stmt.executeQuery()) {
@@ -270,7 +226,7 @@ public class MigrationRunner {
 
                     if (acquiredAt.toInstant().plusSeconds(300).isBefore(Instant.now())) {
                         log.warn("Lock appears stale, attempting to break");
-                        String breakSql = "DELETE FROM swiftmapper_migration_locks WHERE lock_id = ?";
+                        String breakSql = sql.deleteWhere("swiftmapper_migration_locks", "lock_id");
                         try (PreparedStatement breakStmt = connection.prepareStatement(breakSql)) {
                             breakStmt.setString(1, lockId);
                             if (breakStmt.executeUpdate() > 0) {
@@ -288,8 +244,8 @@ public class MigrationRunner {
         if (lock == null) return;
 
         try {
-            String sql = "DELETE FROM swiftmapper_migration_locks WHERE lock_id = ?";
-            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            String deleteSql = sql.deleteWhere("swiftmapper_migration_locks", "lock_id");
+            try (PreparedStatement stmt = connection.prepareStatement(deleteSql)) {
                 stmt.setString(1, lock.lockId());
                 stmt.executeUpdate();
             }
@@ -306,32 +262,32 @@ public class MigrationRunner {
     }
 
     private void createMigrationTable(Connection connection) throws SQLException {
-        String sql = """
-            CREATE TABLE IF NOT EXISTS swiftmapper_migrations (
-                filename VARCHAR(255) PRIMARY KEY,
-                checksum VARCHAR(64),
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                execution_time_ms INTEGER
-            )
-            """;
+        String migrationsDefinition = String.join(", ",
+                sql.identifier("filename") + " " + dialect.stringType(255) + " PRIMARY KEY",
+                sql.identifier("checksum") + " " + dialect.stringType(64),
+                sql.identifier("applied_at") + " " + dialect.timestampType() + " DEFAULT CURRENT_TIMESTAMP",
+                sql.identifier("execution_time_ms") + " " + dialect.integerType()
+        );
 
-        String lockTableSql = """
-            CREATE TABLE IF NOT EXISTS swiftmapper_migration_locks (
-                lock_id VARCHAR(255) PRIMARY KEY,
-                acquired_at TIMESTAMP NOT NULL,
-                process_info VARCHAR(500)
-            )
-            """;
+        String locksDefinition = String.join(", ",
+                sql.identifier("lock_id") + " " + dialect.stringType(255) + " PRIMARY KEY",
+                sql.identifier("acquired_at") + " " + dialect.timestampType() + " NOT NULL",
+                sql.identifier("process_info") + " " + dialect.stringType(500)
+        );
+
+        String migrationsSql = dialect.createTableIfNotExists("swiftmapper_migrations", migrationsDefinition);
+        String lockTableSql = dialect.createTableIfNotExists("swiftmapper_migration_locks", locksDefinition);
 
         try (Statement stmt = connection.createStatement()) {
-            stmt.execute(sql);
+            stmt.execute(migrationsSql);
             stmt.execute(lockTableSql);
         }
     }
 
     private Optional<MigrationRecord> getMigrationRecord(Connection connection, String filename) throws SQLException {
-        String sql = "SELECT filename, checksum, applied_at FROM swiftmapper_migrations WHERE filename = ?";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+        String selectSql = sql.selectColumnsWhereEquals("swiftmapper_migrations",
+                List.of("filename", "checksum", "applied_at"), "filename");
+        try (PreparedStatement stmt = connection.prepareStatement(selectSql)) {
             stmt.setString(1, filename);
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
@@ -347,8 +303,8 @@ public class MigrationRunner {
     }
 
     private void recordMigration(Connection connection, String filename, String checksum) throws SQLException {
-        String sql = "INSERT INTO swiftmapper_migrations (filename, checksum) VALUES (?, ?)";
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+        String insertSql = sql.insert("swiftmapper_migrations", List.of("filename", "checksum"));
+        try (PreparedStatement stmt = connection.prepareStatement(insertSql)) {
             stmt.setString(1, filename);
             stmt.setString(2, checksum);
             stmt.executeUpdate();

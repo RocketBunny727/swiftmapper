@@ -105,7 +105,7 @@ public abstract class SwiftRepositorySupport<T, ID> implements SwiftRepositoryPa
     public long count() {
         try {
             Session<T> session = createSession();
-            SQLQueryBuilder builder = new SQLQueryBuilder();
+            SQLQueryBuilder builder = new SQLQueryBuilder(connectionManager.getDialect());
             var query = builder.from(entityClass).buildCount();
             List<?> result = session.query(query.getSql(), query.getParams().toArray(new Object[0]));
             return result.isEmpty() ? 0 : ((Number) result.get(0)).longValue();
@@ -144,12 +144,12 @@ public abstract class SwiftRepositorySupport<T, ID> implements SwiftRepositoryPa
 
     @Override
     public CriteriaBuilder<T> criteria() {
-        return new CriteriaBuilder<>(entityClass);
+        return new CriteriaBuilder<>(entityClass, connectionManager.getDialect());
     }
 
     @Override
     public SQLQueryBuilder sql() {
-        return new SQLQueryBuilder().from(entityClass);
+        return new SQLQueryBuilder(connectionManager.getDialect()).from(entityClass);
     }
 
     @SuppressWarnings("unchecked")
