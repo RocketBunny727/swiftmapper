@@ -15,7 +15,9 @@ public class ConnectionPool {
         hikariConfig.setJdbcUrl(config.url());
         hikariConfig.setUsername(config.username());
         hikariConfig.setPassword(config.password());
-        hikariConfig.setDriverClassName(config.driverClassName());
+        if (config.driverClassName() != null && !config.driverClassName().isBlank()) {
+            hikariConfig.setDriverClassName(config.driverClassName());
+        }
 
         hikariConfig.setMaximumPoolSize(poolConfig.maxSize());
         hikariConfig.setMinimumIdle(poolConfig.minIdle());

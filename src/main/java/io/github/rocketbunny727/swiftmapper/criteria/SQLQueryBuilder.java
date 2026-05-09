@@ -3,6 +3,8 @@ package io.github.rocketbunny727.swiftmapper.criteria;
 import io.github.rocketbunny727.swiftmapper.criteria.model.BuiltQuery;
 import io.github.rocketbunny727.swiftmapper.criteria.model.JoinClause;
 import io.github.rocketbunny727.swiftmapper.criteria.model.WhereCondition;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlRenderer;
 import io.github.rocketbunny727.swiftmapper.utils.naming.NamingStrategy;
 import io.github.rocketbunny727.swiftmapper.utils.logger.SwiftLogger;
 
@@ -12,6 +14,8 @@ import java.util.function.Consumer;
 
 public class SQLQueryBuilder {
     private final SwiftLogger log = SwiftLogger.getLogger(SQLQueryBuilder.class);
+    private final SqlDialect dialect;
+    private final SqlRenderer renderer;
     private final StringBuilder sql = new StringBuilder();
     private final List<Object> params = new ArrayList<>();
     private final List<String> selectColumns = new ArrayList<>();
@@ -24,7 +28,17 @@ public class SQLQueryBuilder {
     private Integer limit;
     private Integer offset;
     private boolean forUpdate = false;
+    private boolean forUpdateNoWait = false;
     private boolean distinct = false;
+
+    public SQLQueryBuilder() {
+        this(SqlDialect.GENERIC);
+    }
+
+    public SQLQueryBuilder(SqlDialect dialect) {
+        this.dialect = dialect != null ? dialect : SqlDialect.GENERIC;
+        this.renderer = new SqlRenderer(this.dialect);
+    }
 
     public SQLQueryBuilder select(String... columns) {
         for (String col : columns) {
@@ -145,17 +159,17 @@ public class SQLQueryBuilder {
     }
 
     public SQLQueryBuilder orderBy(String column) {
-        orderByColumns.add(column + " ASC");
+        orderByColumns.add(renderer.orderBy(column, "ASC"));
         return this;
     }
 
     public SQLQueryBuilder orderBy(String column, String direction) {
-        orderByColumns.add(column + " " + direction);
+        orderByColumns.add(renderer.orderBy(column, direction));
         return this;
     }
 
     public SQLQueryBuilder orderByDesc(String column) {
-        orderByColumns.add(column + " DESC");
+        orderByColumns.add(renderer.orderBy(column, "DESC"));
         return this;
     }
 
@@ -182,7 +196,7 @@ public class SQLQueryBuilder {
 
     public SQLQueryBuilder forUpdateNoWait() {
         this.forUpdate = true;
-        sql.append(" FOR UPDATE NOWAIT");
+        this.forUpdateNoWait = true;
         return this;
     }
 
@@ -210,7 +224,9 @@ public class SQLQueryBuilder {
         if (selectColumns.isEmpty() || selectColumns.get(0).equals("*")) {
             sql.append("*");
         } else {
-            sql.append(String.join(", ", selectColumns));
+            sql.append(selectColumns.stream()
+                    .map(renderer::renderReference)
+                    .collect(java.util.stream.Collectors.joining(", ")));
         }
         sql.append(")");
 
@@ -230,12 +246,14 @@ public class SQLQueryBuilder {
         if (selectColumns.isEmpty()) {
             sql.append(alias).append(".*");
         } else {
-            sql.append(String.join(", ", selectColumns));
+            sql.append(selectColumns.stream()
+                    .map(renderer::renderReference)
+                    .collect(java.util.stream.Collectors.joining(", ")));
         }
     }
 
     private void buildFrom() {
-        sql.append(" FROM ").append(tableName);
+        sql.append(" FROM ").append(renderer.table(tableName));
         if (alias != null && !alias.isEmpty()) {
             sql.append(" ").append(alias);
         }
@@ -244,7 +262,7 @@ public class SQLQueryBuilder {
     private void buildJoins() {
         for (JoinClause join : joins) {
             sql.append(" ").append(join.type())
-                    .append(" ").append(join.table());
+                    .append(" ").append(renderer.table(join.table()));
             if (join.alias() != null) {
                 sql.append(" ").append(join.alias());
             }
@@ -271,7 +289,7 @@ public class SQLQueryBuilder {
         String operator = condition.operator();
         Object value = condition.value();
 
-        sql.append(condition.column()).append(" ");
+        sql.append(renderer.renderReference(condition.column())).append(" ");
 
         switch (operator) {
             case "IS NULL", "IS NOT NULL" -> sql.append(operator);
@@ -304,7 +322,9 @@ public class SQLQueryBuilder {
 
     private void buildGroupBy() {
         if (groupByColumns.isEmpty()) return;
-        sql.append(" GROUP BY ").append(String.join(", ", groupByColumns));
+        sql.append(" GROUP BY ").append(groupByColumns.stream()
+                .map(renderer::renderReference)
+                .collect(java.util.stream.Collectors.joining(", ")));
     }
 
     private void buildOrderBy() {
@@ -313,17 +333,14 @@ public class SQLQueryBuilder {
     }
 
     private void buildLimitOffset() {
-        if (limit != null) {
-            sql.append(" LIMIT ").append(limit);
-        }
-        if (offset != null) {
-            sql.append(" OFFSET ").append(offset);
-        }
+        String rendered = dialect.applyLimitOffset(sql.toString(), limit, offset);
+        sql.setLength(0);
+        sql.append(rendered);
     }
 
     private void buildForUpdate() {
         if (forUpdate) {
-            sql.append(" FOR UPDATE");
+            sql.append(dialect.forUpdateClause(forUpdateNoWait));
         }
     }
 

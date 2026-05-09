@@ -1,5 +1,6 @@
 package io.github.rocketbunny727.swiftmapper.config;
 
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
 import io.github.rocketbunny727.swiftmapper.utils.logger.SwiftLogger;
 import org.yaml.snakeyaml.Yaml;
 
@@ -151,13 +152,20 @@ public class ConfigReader {
         if (config.isEmpty()) {
             throw new IllegalStateException("Configuration file (application.yml or application.properties) not found.");
         }
+        String url = getString("swiftmapper.datasource.url");
+        String configuredDriver = getString("swiftmapper.datasource.driver-class-name", null);
+        String driverClassName = configuredDriver != null && !configuredDriver.isBlank()
+                ? configuredDriver
+                : SqlDialect.inferDriverClassName(url).orElse(null);
+
         return new DatasourceConfig(
-                getString("swiftmapper.datasource.url"),
+                url,
                 getString("swiftmapper.datasource.username"),
                 getString("swiftmapper.datasource.password"),
-                getString("swiftmapper.datasource.driver-class-name", "org.h2.Driver"),
+                driverClassName,
                 getString("swiftmapper.migrations.location", "db/migrations"),
-                getString("swiftmapper.datasource.ddl-auto", "update")
+                getString("swiftmapper.datasource.ddl-auto", "update"),
+                getString("swiftmapper.datasource.dialect", null)
         );
     }
 

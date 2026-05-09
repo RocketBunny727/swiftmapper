@@ -1,6 +1,7 @@
 package io.github.rocketbunny727.swiftmapper.repository.query;
 
 import io.github.rocketbunny727.swiftmapper.core.ConnectionManager;
+import io.github.rocketbunny727.swiftmapper.core.EagerLoader;
 import io.github.rocketbunny727.swiftmapper.core.EntityMapper;
 import io.github.rocketbunny727.swiftmapper.query.model.ParameterBinding;
 import io.github.rocketbunny727.swiftmapper.query.model.ParsedQuery;
@@ -74,7 +75,7 @@ public class QueryRepositoryFactory {
             this.idClass = extractIdClass(repositoryInterface);
 
             this.mapper = EntityMapper.getInstance((Class) entityClass, connectionManager);
-            this.parser = new QueryMethodParser(this.mapper);
+            this.parser = new QueryMethodParser(this.mapper, connectionManager.getDialect());
 
             this.baseRepository = new SwiftRepositorySupport(connectionManager, entityClass, this.idClass) {};
 
@@ -207,6 +208,12 @@ public class QueryRepositoryFactory {
                         while (rs.next()) {
                             results.add(mapper.map(rs));
                         }
+                    }
+
+                    String[] eagerRelations = EagerLoader.getEagerRelationNames(entityClass);
+                    if (!results.isEmpty() && eagerRelations.length > 0) {
+                        EagerLoader.batchLoad((List) results, (Class) entityClass,
+                                connection, connectionManager, eagerRelations);
                     }
 
                     Class<?> returnType = method.getReturnType();

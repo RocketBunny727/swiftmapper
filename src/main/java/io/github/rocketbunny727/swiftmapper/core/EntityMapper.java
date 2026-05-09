@@ -3,6 +3,8 @@ package io.github.rocketbunny727.swiftmapper.core;
 import io.github.rocketbunny727.swiftmapper.annotations.entity.Entity;
 import io.github.rocketbunny727.swiftmapper.annotations.entity.Id;
 import io.github.rocketbunny727.swiftmapper.annotations.relationship.*;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlDialect;
+import io.github.rocketbunny727.swiftmapper.dialect.SqlRenderer;
 import io.github.rocketbunny727.swiftmapper.utils.naming.NamingStrategy;
 import io.github.rocketbunny727.swiftmapper.exception.MappingException;
 import io.github.rocketbunny727.swiftmapper.utils.logger.SwiftLogger;
@@ -25,16 +27,19 @@ public class EntityMapper<T> {
     private final Constructor<T> constructor;
     private final Field idField;
     private final ConnectionManager connectionManager;
+    private final SqlRenderer sqlRenderer;
 
     private static final SwiftLogger log = SwiftLogger.getLogger(EntityMapper.class);
-    private static final Map<Class<?>, EntityMapper<?>> cache = new ConcurrentHashMap<>();
+    private static final Map<MapperKey, EntityMapper<?>> cache = new ConcurrentHashMap<>();
     private static final int MAX_DEPTH = 10;
     private static final int MAX_CACHE_SIZE = 100;
-    private static final int MAX_CONNECTIONS_PER_OPERATION = 5;
 
     public EntityMapper(Class<T> entityClass, ConnectionManager connectionManager) {
         this.entityClass = entityClass;
         this.connectionManager = connectionManager;
+        this.sqlRenderer = new SqlRenderer(connectionManager != null
+                ? connectionManager.getDialect()
+                : SqlDialect.GENERIC);
 
         if (!entityClass.isAnnotationPresent(Entity.class))
             throw new IllegalArgumentException("Class must be @Entity");
@@ -57,9 +62,13 @@ public class EntityMapper<T> {
             cache.clear();
             log.warn("EntityMapper cache cleared due to size limit");
         }
-        return (EntityMapper<T>) cache.computeIfAbsent(entityClass,
+        SqlDialect dialect = connectionManager != null ? connectionManager.getDialect() : SqlDialect.GENERIC;
+        MapperKey key = new MapperKey(entityClass, dialect);
+        return (EntityMapper<T>) cache.computeIfAbsent(key,
                 k -> new EntityMapper<>(entityClass, connectionManager));
     }
+
+    private record MapperKey(Class<?> entityClass, SqlDialect dialect) {}
 
     public Class<T> getEntityClass() {
         return entityClass;
@@ -187,109 +196,13 @@ public class EntityMapper<T> {
                 }
             }
 
-            int eagerCount = 0;
             for (RelationshipField relField : relationshipFields.values()) {
-                if (shouldFetchEager(relField)) {
-                    if (eagerCount >= MAX_CONNECTIONS_PER_OPERATION) {
-                        log.warn("Max eager connections reached, switching to lazy for remaining fields");
-                        setLazyProxy(entity, relField, id);
-                    } else {
-                        eagerCount++;
-                        loadRelationship(entity, relField, rs, visited, depth + 1);
-                    }
-                } else {
-                    setLazyProxy(entity, relField, id);
-                }
+                setLazyProxy(entity, relField, id);
             }
 
             return entity;
         } catch (Exception e) {
             throw new MappingException("Mapping error for " + entityClass.getSimpleName(), e);
-        }
-    }
-
-    private boolean shouldFetchEager(RelationshipField relField) {
-        Field field = relField.field();
-        return switch (relField.type()) {
-            case ONE_TO_ONE -> {
-                OneToOne anno = field.getAnnotation(OneToOne.class);
-                yield anno == null || anno.fetch() == FetchType.EAGER;
-            }
-            case MANY_TO_ONE -> {
-                ManyToOne anno = field.getAnnotation(ManyToOne.class);
-                yield anno == null || anno.fetch() == FetchType.EAGER;
-            }
-            case ONE_TO_MANY -> {
-                OneToMany anno = field.getAnnotation(OneToMany.class);
-                yield anno != null && anno.fetch() == FetchType.EAGER;
-            }
-            case MANY_TO_MANY -> {
-                ManyToMany anno = field.getAnnotation(ManyToMany.class);
-                yield anno != null && anno.fetch() == FetchType.EAGER;
-            }
-        };
-    }
-
-    private void loadRelationship(T entity, RelationshipField relField, ResultSet rs,
-                                  Map<String, Object> visited, int depth) throws Exception {
-        Field field = relField.field();
-        Class<?> targetClass = NamingStrategy.getTargetClass(field);
-
-        switch (relField.type()) {
-            case MANY_TO_ONE -> {
-                String fkColumn = NamingStrategy.getForeignKeyColumn(field);
-                Object fkValue = rs.getObject(fkColumn);
-                if (fkValue != null) {
-                    Object related = fetchById(targetClass, fkValue, visited, depth);
-                    field.set(entity, related);
-                }
-            }
-
-            case ONE_TO_ONE -> {
-                OneToOne anno = field.getAnnotation(OneToOne.class);
-                Object ownerId = idField.get(entity);
-
-                if (!anno.mappedBy().isEmpty()) {
-                    Object related = fetchOneToOneMappedBy(targetClass, anno.mappedBy(),
-                            ownerId, visited, depth);
-                    field.set(entity, related);
-                } else {
-                    String fkColumn = NamingStrategy.getOneToOneFkColumn(field);
-                    Object fkValue = rs.getObject(fkColumn);
-                    if (fkValue != null) {
-                        Object related = fetchById(targetClass, fkValue, visited, depth);
-                        field.set(entity, related);
-                    }
-                }
-            }
-
-            case ONE_TO_MANY -> {
-                OneToMany anno = field.getAnnotation(OneToMany.class);
-                Class<?> elementType = (Class<?>) ((ParameterizedType) field.getGenericType())
-                        .getActualTypeArguments()[0];
-                Object ownerId = idField.get(entity);
-                List<?> related = fetchOneToMany(elementType, anno.mappedBy(),
-                        ownerId, visited, depth);
-                field.set(entity, related);
-            }
-
-            case MANY_TO_MANY -> {
-                ManyToMany anno = field.getAnnotation(ManyToMany.class);
-                Class<?> elementType = (Class<?>) ((ParameterizedType) field.getGenericType())
-                        .getActualTypeArguments()[0];
-                Object ownerId = idField.get(entity);
-
-                if (!anno.mappedBy().isEmpty()) {
-                    List<?> related = fetchManyToManyInverse(elementType, anno.mappedBy(),
-                            ownerId, visited, depth);
-                    field.set(entity, related);
-                } else {
-                    JoinTable jt = field.getAnnotation(JoinTable.class);
-                    List<?> related = fetchManyToMany(elementType, jt,
-                            ownerId, visited, depth);
-                    field.set(entity, related);
-                }
-            }
         }
     }
 
@@ -410,8 +323,7 @@ public class EntityMapper<T> {
     private Object fetchByIdWithConnection(Class<?> targetClass, Object id, Map<String, Object> visited, int depth, Connection conn)
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(targetClass, connectionManager);
-        String sql = "SELECT * FROM " + targetMapper.getTableName() + " WHERE "
-                + targetMapper.getIdColumn() + " = ?";
+        String sql = sqlRenderer.selectById(targetMapper.getTableName(), targetMapper.getIdColumn());
 
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setQueryTimeout(30);
@@ -436,8 +348,7 @@ public class EntityMapper<T> {
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(targetClass, connectionManager);
         String fkColumn = NamingStrategy.getOneToManyFkColumn(entityClass, mappedBy);
-        String sql = "SELECT * FROM " + targetMapper.getTableName() + " WHERE "
-                + fkColumn + " = ?";
+        String sql = sqlRenderer.selectAllWhereEquals(targetMapper.getTableName(), fkColumn);
 
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setQueryTimeout(30);
@@ -462,8 +373,7 @@ public class EntityMapper<T> {
             throws SQLException {
         EntityMapper<?> targetMapper = EntityMapper.getInstance(elementType, connectionManager);
         String fkColumn = NamingStrategy.getOneToManyFkColumn(entityClass, mappedBy);
-        String sql = "SELECT * FROM " + targetMapper.getTableName() + " WHERE "
-                + fkColumn + " = ?";
+        String sql = sqlRenderer.selectAllWhereEquals(targetMapper.getTableName(), fkColumn);
 
         List<Object> result = new ArrayList<>();
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
@@ -492,9 +402,11 @@ public class EntityMapper<T> {
         String joinCol = NamingStrategy.getJoinColumnName(jt, entityClass, true);
         String inverseCol = NamingStrategy.getJoinColumnName(jt, elementType, false);
 
-        String sql = "SELECT t.* FROM " + targetMapper.getTableName() + " t " +
-                "JOIN " + joinTable + " j ON t." + targetMapper.getIdColumn() + " = j." + inverseCol +
-                " WHERE j." + joinCol + " = ?";
+        String sql = "SELECT t.* FROM " + sqlRenderer.table(targetMapper.getTableName()) + " t "
+                + "JOIN " + sqlRenderer.table(joinTable) + " j ON "
+                + sqlRenderer.qualify("t", targetMapper.getIdColumn()) + " = "
+                + sqlRenderer.qualify("j", inverseCol)
+                + " WHERE " + sqlRenderer.qualify("j", joinCol) + " = ?";
 
         List<Object> result = new ArrayList<>();
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
@@ -524,11 +436,31 @@ public class EntityMapper<T> {
                 .orElseThrow();
 
         JoinTable jt = mappedField.getAnnotation(JoinTable.class);
-        return fetchManyToManyWithConnection(elementType, jt, ownerId, visited, depth, conn);
+        EntityMapper<?> targetMapper = EntityMapper.getInstance(elementType, connectionManager);
+        String joinTable = NamingStrategy.getJoinTableName(elementType, entityClass, jt);
+        String ownerColumn = NamingStrategy.getJoinColumnName(jt, entityClass, false);
+        String targetColumn = NamingStrategy.getJoinColumnName(jt, elementType, true);
+
+        String sql = "SELECT t.* FROM " + sqlRenderer.table(targetMapper.getTableName()) + " t "
+                + "JOIN " + sqlRenderer.table(joinTable) + " j ON "
+                + sqlRenderer.qualify("t", targetMapper.getIdColumn()) + " = "
+                + sqlRenderer.qualify("j", targetColumn)
+                + " WHERE " + sqlRenderer.qualify("j", ownerColumn) + " = ?";
+
+        List<Object> result = new ArrayList<>();
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setQueryTimeout(30);
+            stmt.setObject(1, ownerId);
+            ResultSet rs = stmt.executeQuery();
+            while (rs.next()) {
+                result.add(targetMapper.map(rs, visited, depth));
+            }
+        }
+        return result;
     }
 
     private Object fetchFkValue(Object ownerId, String fkColumn, String tableName, Connection conn) throws SQLException {
-        String sql = "SELECT " + fkColumn + " FROM " + tableName + " WHERE " + getIdColumn() + " = ?";
+        String sql = sqlRenderer.selectColumnWhereEquals(tableName, fkColumn, getIdColumn());
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setQueryTimeout(30);
             stmt.setObject(1, ownerId);
