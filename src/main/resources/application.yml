@@ -1,30 +1,40 @@
+
+# --- Пример конфигурации SwiftMapper---
 swiftmapper:
+
+  # --- Источник данных ---
   datasource:
-    url: jdbc:postgresql://localhost:5432/swiftmapper
-    username: postgres
-    password: 471979
-    driver-class-name: org.postgresql.Driver
-    dialect: postgresql
+    url: jdbc:postgresql://localhost:5432/swiftmapper_db  # локация базы данных
+    username: postgres                                    # имя пользователя
+    password: 123456                                      # пароль
+    driver-class-name: org.postgresql.Driver              # имя драйвера для СУБД
+    dialect: POSTGRESQL                                   # диалект СУБД
+    ddl-auto: update                                      # none | validate | update | create | create-drop
 
+  # --- Пул соединений (HikariCP) ---
+  pool:
+    max-size: 10                                          # максимальное число соединений в пуле
+    min-idle: 5                                           # минимальное число простаивающих соединений
+    connection-timeout: 30000                             # таймаут получения соединения, мс
+    idle-timeout: 600000                                  # время до закрытия простаивающего соединения, мс
+    max-lifetime: 1800000                                 # максимальное время жизни соединения, мс
+    leak-detection-threshold: 60000                       # порог обнаружения утечки соединения, мс
+
+  # --- Миграции ---
   migrations:
-    location: db/migrations
+    location: db/migrations                               # путь к SQL-файлам миграций в classpath
 
-  logging:
-    level: DEBUG
-    sql: true
-    transactions: true
-    slow-query-threshold: 1000
-
+  # --- Кэш запросов ---
   cache:
     enabled: true
-    max-size: 1000
-    expire-minutes: 10
-    provider-class: com.rocketbunny.swiftmapper.cache.QueryCache$CaffeineCacheProvider
+    max-size: 1000                                        # максимальное число кэшированных результатов
+    expire-minutes: 10                                    # время жизни записи в кэше
 
-  pool:
-    max-size: 10
-    min-idle: 5
-    connection-timeout: 30000
-    idle-timeout: 600000
-    max-lifetime: 1800000
-    leak-detection-threshold: 60000
+  # --- Логирование ---
+  logging:
+    level: DEBUG                                          # TRACE | DEBUG | INFO | WARN | ERROR | OFF
+    sql: true                                             # выводить сгенерированные SQL-запросы
+    transactions: true                                    # выводить события транзакций
+    slow-query-threshold: 1000                            # порог медленного запроса, мс
+
+
