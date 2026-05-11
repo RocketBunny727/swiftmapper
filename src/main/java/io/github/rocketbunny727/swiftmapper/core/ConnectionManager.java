@@ -24,10 +24,16 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
 
 public class ConnectionManager {
     private final DatasourceConfig dsConfig;
@@ -125,6 +131,7 @@ public class ConnectionManager {
             }
 
             if (!"validate".equalsIgnoreCase(ddlAuto)) {
+                entityClasses = sortByDependency(entityClasses);
                 for (Class<?> entityClass : entityClasses) createTable(connection, entityClass);
                 for (Class<?> entityClass : entityClasses) createJoinTables(connection, entityClass);
             } else {
@@ -140,6 +147,71 @@ public class ConnectionManager {
             }
         }
         return this;
+    }
+
+    private Class<?>[] sortByDependency(Class<?>[] entityClasses) {
+        Set<Class<?>> entitySet = new HashSet<>(Arrays.asList(entityClasses));
+
+        Map<Class<?>, Set<Class<?>>> dependsOn = new LinkedHashMap<>();
+        for (Class<?> cls : entityClasses) {
+            Set<Class<?>> deps = new LinkedHashSet<>();
+            for (Field field : cls.getDeclaredFields()) {
+                if (field.isAnnotationPresent(ManyToOne.class)) {
+                    Class<?> target = field.getType();
+                    if (entitySet.contains(target) && target != cls) deps.add(target);
+                } else if (field.isAnnotationPresent(OneToOne.class)) {
+                    OneToOne oo = field.getAnnotation(OneToOne.class);
+                    if (oo.mappedBy().isEmpty()) {
+                        Class<?> target = field.getType();
+                        if (entitySet.contains(target) && target != cls) deps.add(target);
+                    }
+                }
+            }
+            dependsOn.put(cls, deps);
+        }
+
+        Map<Class<?>, Integer> inDegree = new LinkedHashMap<>();
+        Map<Class<?>, List<Class<?>>> dependents = new LinkedHashMap<>();
+
+        for (Class<?> cls : entityClasses) {
+            inDegree.put(cls, dependsOn.get(cls).size());
+            dependents.put(cls, new ArrayList<>());
+        }
+        for (Class<?> cls : entityClasses) {
+            for (Class<?> dep : dependsOn.get(cls)) {
+                dependents.get(dep).add(cls);
+            }
+        }
+
+        Queue<Class<?>> queue = new ArrayDeque<>();
+        for (Class<?> cls : entityClasses) {
+            if (inDegree.get(cls) == 0) queue.add(cls);
+        }
+
+        List<Class<?>> sorted = new ArrayList<>();
+        while (!queue.isEmpty()) {
+            Class<?> cls = queue.poll();
+            sorted.add(cls);
+            for (Class<?> dependent : dependents.get(cls)) {
+                int deg = inDegree.get(dependent) - 1;
+                inDegree.put(dependent, deg);
+                if (deg == 0) queue.add(dependent);
+            }
+        }
+
+        if (sorted.size() != entityClasses.length) {
+            log.warn("Circular dependency detected among @Entity classes; " +
+                            "falling back to original order. Affected classes: {}",
+                    Arrays.stream(entityClasses)
+                            .filter(c -> !sorted.contains(c))
+                            .map(Class::getSimpleName)
+                            .toList());
+            return entityClasses;
+        }
+
+        log.info("Entity creation order after dependency sort: {}",
+                sorted.stream().map(Class::getSimpleName).toList());
+        return sorted.toArray(new Class[0]);
     }
 
     private void dropTables(Connection connection, Class<?>... entityClasses) throws SQLException {
